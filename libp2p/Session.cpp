@@ -25,8 +25,7 @@
 #include <chrono>
 #include <libdevcore/Common.h>
 #include <libdevcore/CommonIO.h>
-#include <libdevcore/StructuredLogger.h>
-#include <libethcore/Exceptions.h>
+#include <libdevcore/Exceptions.h>
 #include "Host.h"
 #include "Capability.h"
 using namespace std;
@@ -71,14 +70,14 @@ Session::~Session()
 	catch (...){}
 }
 
-ReputationManager& Session::repMan() const
+ReputationManager& Session::repMan()
 {
 	return m_server->repMan();
 }
 
-NodeId Session::id() const
+NodeID Session::id() const
 {
-	return m_peer ? m_peer->id : NodeId();
+	return m_peer ? m_peer->id : NodeID();
 }
 
 void Session::addRating(int _r)
@@ -111,68 +110,21 @@ template <class T> vector<T> randomSelection(vector<T> const& _t, unsigned _n)
 	return ret;
 }
 
-// TODO: P2P integration: replace w/asio post -> serviceNodesRequest()
-void Session::ensureNodesRequested()
-{
-	if (isConnected() && !m_weRequestedNodes)
-	{
-		m_weRequestedNodes = true;
-		RLPStream s;
-		sealAndSend(prep(s, GetPeersPacket));
-	}
-}
-
-void Session::serviceNodesRequest()
-{
-	ThreadContext tc(info().id.abridged() + "/" + info().clientVersion);
-
-	if (!m_theyRequestedNodes)
-		return;
-
-// TODO: P2P reimplement, as per TCP "close nodes" gossip specifications (WiP)
-//	auto peers = m_server->potentialPeers(m_knownNodes);
-	Peers peers;
-	if (peers.empty())
-	{
-		addNote("peers", "requested");
-		return;
-	}
-
-	// note this should cost them...
-	RLPStream s;
-	prep(s, PeersPacket, min<unsigned>(10, peers.size()));
-	auto rs = randomSelection(peers, 10);
-	for (auto const& i: rs)
-	{
-		clog(NetTriviaDetail) << "Sending peer " << i.id << i.endpoint;
-		if (i.endpoint.address.is_v4())
-			s.appendList(3) << bytesConstRef(i.endpoint.address.to_v4().to_bytes().data(), 4) << i.endpoint.tcpPort << i.id;
-		else// if (i.second.address().is_v6()) - assumed
-			s.appendList(3) << bytesConstRef(i.endpoint.address.to_v6().to_bytes().data(), 16) << i.endpoint.tcpPort << i.id;
-	}
-	sealAndSend(s);
-	m_theyRequestedNodes = false;
-	addNote("peers", "done");
-}
-
 bool Session::readPacket(uint16_t _capId, PacketType _t, RLP const& _r)
 {
 	m_lastReceived = chrono::steady_clock::now();
 	clog(NetRight) << _t << _r;
-	try		// Generic try-catch block designed to capture RLP format errors - TODO: give decent diagnostics, make a bit more specific over what is caught.
+	try // Generic try-catch block designed to capture RLP format errors - TODO: give decent diagnostics, make a bit more specific over what is caught.
 	{
 		// v4 frame headers are useless, offset packet type used
 		// v5 protocol type is in header, packet type not offset
 		if (_capId == 0 && _t < UserPacket)
 			return interpret(_t, _r);
-		if (m_info.protocolVersion >= 5)
-			for (auto const& i: m_capabilities)
-				if (_capId == (uint16_t)i.first.second)
-					return i.second->m_enabled ? i.second->interpret(_t, _r) : true;
-		if (m_info.protocolVersion <= 4)
-			for (auto const& i: m_capabilities)
-				if (_t >= (int)i.second->m_idOffset && _t - i.second->m_idOffset < i.second->hostCapability()->messageCount())
-					return i.second->m_enabled ? i.second->interpret(_t - i.second->m_idOffset, _r) : true;
+
+		for (auto const& i: m_capabilities)
+			if (_t >= (int)i.second->m_idOffset && _t - i.second->m_idOffset < i.second->hostCapability()->messageCount())
+				return i.second->m_enabled ? i.second->interpret(_t - i.second->m_idOffset, _r) : true;
+
 		return false;
 	}
 	catch (std::exception const& _e)
@@ -204,7 +156,7 @@ bool Session::interpret(PacketType _t, RLP const& _r)
 	}
 	case PingPacket:
 	{
-		clog(NetTriviaSummary) << "Ping";
+		clog(NetTriviaSummary) << "Ping" << m_info.id;
 		RLPStream s;
 		sealAndSend(prep(s, PongPacket));
 		break;
@@ -264,8 +216,8 @@ void Session::send(bytes&& _msg)
 		return;
 
 	bool doWrite = false;
+	DEV_GUARDED(x_framing)
 	{
-		Guard l(x_writeQueue);
 		m_writeQueue.push_back(std::move(_msg));
 		doWrite = (m_writeQueue.size() == 1);
 	}
@@ -276,8 +228,8 @@ void Session::send(bytes&& _msg)
 
 void Session::write()
 {
-	bytes const* out;
-	DEV_GUARDED(x_writeQueue)
+	bytes const* out = nullptr;
+	DEV_GUARDED(x_framing)
 	{
 		m_io->writeSingleFramePacket(&m_writeQueue[0], m_writeQueue[0]);
 		out = &m_writeQueue[0];
@@ -294,15 +246,30 @@ void Session::write()
 			drop(TCPError);
 			return;
 		}
-		else
+
+		DEV_GUARDED(x_framing)
 		{
-			Guard l(x_writeQueue);
 			m_writeQueue.pop_front();
 			if (m_writeQueue.empty())
 				return;
 		}
 		write();
 	});
+}
+
+namespace
+{
+	void halveAtomicInt(atomic<int>& i)
+	{
+		int oldInt = 0;
+		int newInt = 0;
+		do
+		{
+			oldInt = i;
+			newInt = oldInt / 2;
+		}
+		while (i.atomic::compare_exchange_weak(oldInt, newInt));
+	}
 }
 
 void Session::drop(DisconnectReason _reason)
@@ -313,8 +280,8 @@ void Session::drop(DisconnectReason _reason)
 	if (socket.is_open())
 		try
 		{
-			clog(NetConnect) << "Closing " << socket.remote_endpoint() << "(" << reasonOf(_reason) << ")";
 			boost::system::error_code ec;
+			clog(NetConnect) << "Closing " << socket.remote_endpoint(ec) << "(" << reasonOf(_reason) << ")";
 			socket.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
 			socket.close();
 		}
@@ -323,8 +290,8 @@ void Session::drop(DisconnectReason _reason)
 	m_peer->m_lastDisconnect = _reason;
 	if (_reason == BadProtocol)
 	{
-		m_peer->m_rating /= 2;
-		m_peer->m_score /= 2;
+		halveAtomicInt(m_peer->m_rating);
+		halveAtomicInt(m_peer->m_score);
 	}
 	m_dropped = true;
 }
@@ -332,13 +299,7 @@ void Session::drop(DisconnectReason _reason)
 void Session::disconnect(DisconnectReason _reason)
 {
 	clog(NetConnect) << "Disconnecting (our reason:" << reasonOf(_reason) << ")";
-	size_t peerCount = m_server->peerCount(); //needs to  be outside of lock to avoid deadlocking with other thread that capture x_info/x_sessions in reverse order
-	DEV_GUARDED(x_info)
-		StructuredLogger::p2pDisconnected(
-			m_info.id.abridged(),
-			m_peer->endpoint, // TODO: may not be 100% accurate
-			peerCount
-		);
+
 	if (m_socket->ref().is_open())
 	{
 		RLPStream s;
@@ -361,6 +322,7 @@ void Session::doRead()
 		return;
 
 	auto self(shared_from_this());
+	m_data.resize(h256::size);
 	ba::async_read(m_socket->ref(), boost::asio::buffer(m_data, h256::size), [this,self](boost::system::error_code ec, std::size_t length)
 	{
 		ThreadContext tc(info().id.abridged());
@@ -373,7 +335,6 @@ void Session::doRead()
 			drop(BadProtocol); // todo: better error
 			return;
 		}
-
 		
 		uint16_t hProtocolId;
 		uint32_t hLength;
@@ -394,6 +355,7 @@ void Session::doRead()
 
 		/// read padded frame and mac
 		auto tlen = hLength + hPadding + h128::size;
+		m_data.resize(tlen);
 		ba::async_read(m_socket->ref(), boost::asio::buffer(m_data, tlen), [this, self, hLength, hProtocolId, tlen](boost::system::error_code ec, std::size_t length)
 		{
 			ThreadContext tc(info().id.abridged());
@@ -420,11 +382,8 @@ void Session::doRead()
 				auto packetType = (PacketType)RLP(frame.cropped(0, 1)).toInt<unsigned>();
 				RLP r(frame.cropped(1));
 				bool ok = readPacket(hProtocolId, packetType, r);
-				(void)ok;
-#if ETH_DEBUG
 				if (!ok)
 					clog(NetWarn) << "Couldn't interpret packet." << RLP(r);
-#endif
 			}
 			doRead();
 		});
@@ -446,7 +405,22 @@ bool Session::checkRead(std::size_t _expected, boost::system::error_code _ec, st
 		drop(TCPError);
 		return false;
 	}
-	// If this fails then there's an unhandled asio error
-	assert(_expected == _length);
+	else if (_length != _expected)
+	{
+		// with static m_data-sized buffer this shouldn't happen unless there's a regression
+		// sec recommends checking anyways (instead of assert)
+		clog(NetWarn) << "Error reading - TCP read buffer length differs from expected frame size.";
+		disconnect(UserReason);
+		return false;
+	}
+
 	return true;
+}
+
+void Session::registerCapability(CapDesc const& _desc, std::shared_ptr<Capability> _p)
+{
+	DEV_GUARDED(x_framing)
+	{
+		m_capabilities[_desc] = _p;
+	}
 }

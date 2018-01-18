@@ -24,6 +24,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <string>
 #include <set>
 #include <vector>
@@ -54,12 +55,12 @@ namespace p2p
 extern const unsigned c_protocolVersion;
 extern const unsigned c_defaultIPPort;
 
-struct NodeIPEndpoint;
-struct Node;
+class NodeIPEndpoint;
+class Node;
 extern const NodeIPEndpoint UnspecifiedNodeIPEndpoint;
 extern const Node UnspecifiedNode;
 
-using NodeId = h512;
+using NodeID = h512;
 
 bool isPrivateAddress(bi::address const& _addressToCheck);
 bool isPrivateAddress(std::string const& _addressToCheck);
@@ -75,7 +76,9 @@ class Session;
 
 struct NetworkStartRequired: virtual dev::Exception {};
 struct InvalidPublicIPAddress: virtual dev::Exception {};
-struct InvalidHostIPAddress: virtual dev::Exception {};
+
+/// The ECDHE agreement failed during RLPx handshake.
+struct ECDHEError: virtual Exception {};
 
 struct NetWarn: public LogChannel { static const char* name(); static const int verbosity = 0; };
 struct NetNote: public LogChannel { static const char* name(); static const int verbosity = 2; };
@@ -150,7 +153,7 @@ using CapDescs = std::vector<CapDesc>;
  */
 struct PeerSessionInfo
 {
-	NodeId const id;
+	NodeID const id;
 	std::string const clientVersion;
 	std::string const host;
 	unsigned short const port;
@@ -163,11 +166,18 @@ struct PeerSessionInfo
 
 using PeerSessionInfos = std::vector<PeerSessionInfo>;
 
+enum class PeerType
+{
+	Optional,
+	Required
+};
+
 /**
  * @brief IPv4,UDP/TCP endpoints.
  */
-struct NodeIPEndpoint
+class NodeIPEndpoint
 {
+public:
 	enum RLPAppend
 	{
 		StreamList,
@@ -181,38 +191,78 @@ struct NodeIPEndpoint
 	NodeIPEndpoint(bi::address _addr, uint16_t _udp, uint16_t _tcp): address(_addr), udpPort(_udp), tcpPort(_tcp) {}
 	NodeIPEndpoint(RLP const& _r) { interpretRLP(_r); }
 
-	bi::address address = bi::address();
-	uint16_t udpPort = 0;
-	uint16_t tcpPort = 0;
-	
 	operator bi::udp::endpoint() const { return bi::udp::endpoint(address, udpPort); }
 	operator bi::tcp::endpoint() const { return bi::tcp::endpoint(address, tcpPort); }
 	
 	operator bool() const { return !address.is_unspecified() && udpPort > 0 && tcpPort > 0; }
 	
 	bool isAllowed() const { return NodeIPEndpoint::test_allowLocal ? !address.is_unspecified() : isPublicAddress(address); }
+
+	bool operator==(NodeIPEndpoint const& _cmp) const {
+		return address == _cmp.address && udpPort == _cmp.udpPort && tcpPort == _cmp.tcpPort;
+ 	}
+	bool operator!=(NodeIPEndpoint const& _cmp) const {
+		return !operator==(_cmp);
+ 	}
 	
 	void streamRLP(RLPStream& _s, RLPAppend _append = StreamList) const;
 	void interpretRLP(RLP const& _r);
-};
-	
-struct Node
-{
-	Node(Public _pubk, NodeIPEndpoint const& _ip, bool _required = false): id(_pubk), endpoint(_ip), required(_required) {}
 
-	virtual NodeId const& address() const { return id; }
+	// TODO: make private, give accessors and rename m_...
+	bi::address address;
+	uint16_t udpPort = 0;
+	uint16_t tcpPort = 0;
+};
+
+struct NodeSpec
+{
+	NodeSpec() {}
+
+	/// Accepts user-readable strings of the form (enode://pubkey@)host({:port,:tcpport.udpport})
+	NodeSpec(std::string const& _user);
+
+	NodeSpec(std::string const& _addr, uint16_t _port, int _udpPort = -1):
+		m_address(_addr),
+		m_tcpPort(_port),
+		m_udpPort(_udpPort == -1 ? _port : (uint16_t)_udpPort)
+	{}
+
+	NodeID id() const { return m_id; }
+
+	NodeIPEndpoint nodeIPEndpoint() const;
+
+	std::string enode() const;
+
+private:
+	std::string m_address;
+	uint16_t m_tcpPort = 0;
+	uint16_t m_udpPort = 0;
+	NodeID m_id;
+};
+
+class Node
+{
+public:
+	Node() = default;
+	virtual ~Node() = default;
+	Node(Node const&);
+	Node(Public _publicKey, NodeIPEndpoint const& _ip, PeerType _peerType = PeerType::Optional): id(_publicKey), endpoint(_ip), peerType(_peerType) {}
+	Node(NodeSpec const& _s, PeerType _peerType = PeerType::Optional);
+
+	virtual NodeID const& address() const { return id; }
 	virtual Public const& publicKey() const { return id; }
 	
-	NodeId id;
-	
-	/// Endpoints by which we expect to reach node.
-	NodeIPEndpoint endpoint;
-	
-	/// If true, node will not be removed from Node list.
-	// TODO: p2p implement
-	bool required = false;
-	
 	virtual operator bool() const { return (bool)id; }
+
+	// TODO: make private, give accessors and rename m_...
+	NodeID id;
+
+	/// Endpoints by which we expect to reach node.
+	// TODO: make private, give accessors and rename m_...
+	NodeIPEndpoint endpoint;
+
+	// TODO: p2p implement
+	std::atomic<PeerType> peerType{PeerType::Optional};
 };
 
 class DeadlineOps

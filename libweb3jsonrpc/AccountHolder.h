@@ -27,7 +27,7 @@
 #include <algorithm>
 #include <vector>
 #include <map>
-#include <libdevcrypto/Common.h>
+#include <chrono>
 #include <libethcore/CommonJS.h>
 #include <libethereum/Transaction.h>
 
@@ -39,6 +39,23 @@ namespace eth
 class KeyManager;
 class Interface;
 
+enum class TransactionRepercussion
+{
+	Unknown,
+	UnknownAccount,
+	Locked,
+	Refused,
+	ProxySuccess,
+	Success
+};
+
+struct TransactionNotification
+{
+	TransactionRepercussion r;
+	h256 hash;
+	Address created;
+};
+
 /**
  * Manages real accounts (where we know the secret key) and proxy accounts (where transactions
  * to be sent from these accounts are forwarded to a proxy on the other side).
@@ -47,16 +64,29 @@ class AccountHolder
 {
 public:
 	explicit AccountHolder(std::function<Interface*()> const& _client): m_client(_client) {}
+	virtual ~AccountHolder() = default;
 
 	virtual AddressHash realAccounts() const = 0;
 	// use m_web3's submitTransaction
 	// or use AccountHolder::queueTransaction(_t) to accept
-	virtual h256 authenticate(dev::eth::TransactionSkeleton const& _t) = 0;
+	virtual TransactionNotification authenticate(dev::eth::TransactionSkeleton const& _t) = 0;
 
 	Addresses allAccounts() const;
 	bool isRealAccount(Address const& _account) const { return realAccounts().count(_account) > 0; }
 	bool isProxyAccount(Address const& _account) const { return m_proxyAccounts.count(_account) > 0; }
 	Address const& defaultTransactAccount() const;
+
+	/// Automatically authenticate all transactions for the given account for the next @a _duration
+	/// seconds. Decrypt the key with @a _password if needed. @returns true on success.
+	/// Only works for direct accounts.
+	virtual bool unlockAccount(
+		Address const& /*_account*/,
+		std::string const& /*_password*/,
+		unsigned /*_duration*/
+	)
+	{
+		return false;
+	}
 
 	int addProxyAccount(Address const& _account);
 	bool removeProxyAccount(unsigned _id);
@@ -78,18 +108,23 @@ private:
 class SimpleAccountHolder: public AccountHolder
 {
 public:
-	SimpleAccountHolder(std::function<Interface*()> const& _client, std::function<std::string(Address)> const& _getPassword, KeyManager& _keyman):
+	SimpleAccountHolder(std::function<Interface*()> const& _client, std::function<std::string(Address)> const& _getPassword, KeyManager& _keyman, std::function<bool(TransactionSkeleton const&, bool)> _getAuthorisation = std::function<bool(TransactionSkeleton const&, bool)>()):
 		AccountHolder(_client),
 		m_getPassword(_getPassword),
+		m_getAuthorisation(_getAuthorisation),
 		m_keyManager(_keyman)
 	{}
 
 	AddressHash realAccounts() const override;
-	h256 authenticate(dev::eth::TransactionSkeleton const& _t) override;
+	TransactionNotification authenticate(dev::eth::TransactionSkeleton const& _t) override;
+
+	virtual bool unlockAccount(Address const& _account, std::string const& _password, unsigned _duration) override;
 
 private:
 	std::function<std::string(Address)> m_getPassword;
+	std::function<bool(TransactionSkeleton const&, bool)> m_getAuthorisation;
 	KeyManager& m_keyManager;
+	std::map<Address, std::pair<std::chrono::steady_clock::time_point, unsigned>> m_unlockedAccounts;
 };
 
 class FixedAccountHolder: public AccountHolder
@@ -117,7 +152,7 @@ public:
 
 	// use m_web3's submitTransaction
 	// or use AccountHolder::queueTransaction(_t) to accept
-	h256 authenticate(dev::eth::TransactionSkeleton const& _t) override;
+	TransactionNotification authenticate(dev::eth::TransactionSkeleton const& _t) override;
 
 private:
 	std::unordered_map<dev::Address, dev::Secret> m_accounts;

@@ -26,7 +26,7 @@
 using namespace std;
 using namespace dev;
 using namespace dev::p2p;
-using namespace CryptoPP;
+using namespace dev::crypto;
 
 void RLPXHandshake::writeAuth()
 {
@@ -39,9 +39,9 @@ void RLPXHandshake::writeAuth()
 	
 	// E(remote-pubk, S(ecdhe-random, ecdh-shared-secret^nonce) || H(ecdhe-random-pubk) || pubk || nonce || 0x0)
 	Secret staticShared;
-	crypto::ecdh::agree(m_host->m_alias.sec(), m_remote, staticShared);
-	sign(m_ecdhe.seckey(), staticShared.makeInsecure() ^ m_nonce).ref().copyTo(sig);
-	sha3(m_ecdhe.pubkey().ref(), hepubk);
+	crypto::ecdh::agree(m_host->m_alias.secret(), m_remote, staticShared);
+	sign(m_ecdheLocal.secret(), staticShared.makeInsecure() ^ m_nonce).ref().copyTo(sig);
+	sha3(m_ecdheLocal.pub().ref(), hepubk);
 	m_host->m_alias.pub().ref().copyTo(pubk);
 	m_nonce.ref().copyTo(nonce);
 	m_auth[m_auth.size() - 1] = 0x0;
@@ -60,10 +60,35 @@ void RLPXHandshake::writeAck()
 	m_ack.resize(Public::size + h256::size + 1);
 	bytesRef epubk(&m_ack[0], Public::size);
 	bytesRef nonce(&m_ack[Public::size], h256::size);
-	m_ecdhe.pubkey().ref().copyTo(epubk);
+	m_ecdheLocal.pub().ref().copyTo(epubk);
 	m_nonce.ref().copyTo(nonce);
 	m_ack[m_ack.size() - 1] = 0x0;
 	encryptECIES(m_remote, &m_ack, m_ackCipher);
+
+	auto self(shared_from_this());
+	ba::async_write(m_socket->ref(), ba::buffer(m_ackCipher), [this, self](boost::system::error_code ec, std::size_t)
+	{
+		transition(ec);
+	});
+}
+
+void RLPXHandshake::writeAckEIP8()
+{
+	clog(NetP2PConnect) << "p2p.connect.ingress sending EIP-8 ack to " << m_socket->remoteEndpoint();
+
+	RLPStream rlp;
+	rlp.appendList(3)
+		<< m_ecdheLocal.pub()
+		<< m_nonce
+		<< c_rlpxVersion;
+	m_ack = rlp.out();
+	int padAmount(rand()%100 + 100);
+	m_ack.resize(m_ack.size() + padAmount, 0);
+
+	bytes prefix(2);
+	toBigEndian<uint16_t>(m_ack.size() + c_eciesOverhead, prefix);
+	encryptECIES(m_remote, bytesConstRef(&prefix), &m_ack, m_ackCipher);
+	m_ackCipher.insert(m_ackCipher.begin(), prefix.begin(), prefix.end());
 	
 	auto self(shared_from_this());
 	ba::async_write(m_socket->ref(), ba::buffer(m_ackCipher), [this, self](boost::system::error_code ec, std::size_t)
@@ -72,36 +97,67 @@ void RLPXHandshake::writeAck()
 	});
 }
 
+void RLPXHandshake::setAuthValues(Signature const& _sig, Public const& _remotePubk, h256 const& _remoteNonce, uint64_t _remoteVersion)
+{
+	_remotePubk.ref().copyTo(m_remote.ref());
+	_remoteNonce.ref().copyTo(m_remoteNonce.ref());
+	m_remoteVersion = _remoteVersion;
+	Secret sharedSecret;
+	crypto::ecdh::agree(m_host->m_alias.secret(), _remotePubk, sharedSecret);
+	m_ecdheRemote = recover(_sig, sharedSecret.makeInsecure() ^ _remoteNonce);
+}
+
 void RLPXHandshake::readAuth()
 {
-	clog(NetP2PConnect) << "p2p.connect.ingress recving auth from " << m_socket->remoteEndpoint();
+	clog(NetP2PConnect) << "p2p.connect.ingress receiving auth from " << m_socket->remoteEndpoint();
 	m_authCipher.resize(307);
 	auto self(shared_from_this());
 	ba::async_read(m_socket->ref(), ba::buffer(m_authCipher, 307), [this, self](boost::system::error_code ec, std::size_t)
 	{
 		if (ec)
 			transition(ec);
-		else if (decryptECIES(m_host->m_alias.sec(), bytesConstRef(&m_authCipher), m_auth))
+		else if (decryptECIES(m_host->m_alias.secret(), bytesConstRef(&m_authCipher), m_auth))
 		{
-			bytesConstRef sig(&m_auth[0], Signature::size);
-			bytesConstRef hepubk(&m_auth[Signature::size], h256::size);
-			bytesConstRef pubk(&m_auth[Signature::size + h256::size], Public::size);
-			bytesConstRef nonce(&m_auth[Signature::size + h256::size + Public::size], h256::size);
-			pubk.copyTo(m_remote.ref());
-			nonce.copyTo(m_remoteNonce.ref());
-			
-			Secret sharedSecret;
-			crypto::ecdh::agree(m_host->m_alias.sec(), m_remote, sharedSecret);
-			m_remoteEphemeral = recover(*(Signature*)sig.data(), sharedSecret.makeInsecure() ^ m_remoteNonce);
+			bytesConstRef data(&m_auth);
+			Signature sig(data.cropped(0, Signature::size));
+			Public pubk(data.cropped(Signature::size + h256::size, Public::size));
+			h256 nonce(data.cropped(Signature::size + h256::size + Public::size, h256::size));
+			setAuthValues(sig, pubk, nonce, 4);
+			transition();
+		}
+		else
+			readAuthEIP8();
+	});
+}
 
-			if (sha3(m_remoteEphemeral) != *(h256*)hepubk.data())
-				clog(NetP2PConnect) << "p2p.connect.ingress auth failed (invalid: hash mismatch) for" << m_socket->remoteEndpoint();
-			
+void RLPXHandshake::readAuthEIP8()
+{
+	assert(m_authCipher.size() == 307);
+	uint16_t size(m_authCipher[0]<<8 | m_authCipher[1]);
+	clog(NetP2PConnect) << "p2p.connect.ingress receiving " << size << "bytes EIP-8 auth from " << m_socket->remoteEndpoint();
+	m_authCipher.resize((size_t)size + 2);
+	auto rest = ba::buffer(ba::buffer(m_authCipher) + 307);
+	auto self(shared_from_this());
+	ba::async_read(m_socket->ref(), rest, [this, self](boost::system::error_code ec, std::size_t)
+	{
+		bytesConstRef ct(&m_authCipher);
+		if (ec)
+			transition(ec);
+		else if (decryptECIES(m_host->m_alias.secret(), ct.cropped(0, 2), ct.cropped(2), m_auth))
+		{
+			RLP rlp(m_auth, RLP::ThrowOnFail | RLP::FailIfTooSmall);
+			setAuthValues(
+				rlp[0].toHash<Signature>(),
+				rlp[1].toHash<Public>(),
+				rlp[2].toHash<h256>(),
+				rlp[3].toInt<uint64_t>()
+			);
+			m_nextState = AckAuthEIP8;
 			transition();
 		}
 		else
 		{
-			clog(NetP2PConnect) << "p2p.connect.ingress recving auth decrypt failed for" << m_socket->remoteEndpoint();
+			clog(NetP2PConnect) << "p2p.connect.ingress auth decrypt failed for" << m_socket->remoteEndpoint();
 			m_nextState = Error;
 			transition();
 		}
@@ -110,40 +166,72 @@ void RLPXHandshake::readAuth()
 
 void RLPXHandshake::readAck()
 {
-	clog(NetP2PConnect) << "p2p.connect.egress recving ack from " << m_socket->remoteEndpoint();
+	clog(NetP2PConnect) << "p2p.connect.egress receiving ack from " << m_socket->remoteEndpoint();
 	m_ackCipher.resize(210);
 	auto self(shared_from_this());
 	ba::async_read(m_socket->ref(), ba::buffer(m_ackCipher, 210), [this, self](boost::system::error_code ec, std::size_t)
 	{
 		if (ec)
 			transition(ec);
-		else if (decryptECIES(m_host->m_alias.sec(), bytesConstRef(&m_ackCipher), m_ack))
+		else if (decryptECIES(m_host->m_alias.secret(), bytesConstRef(&m_ackCipher), m_ack))
 		{
-			bytesConstRef(&m_ack).cropped(0, Public::size).copyTo(m_remoteEphemeral.ref());
+			bytesConstRef(&m_ack).cropped(0, Public::size).copyTo(m_ecdheRemote.ref());
 			bytesConstRef(&m_ack).cropped(Public::size, h256::size).copyTo(m_remoteNonce.ref());
+			m_remoteVersion = 4;
+			transition();
+		}
+		else
+			readAckEIP8();
+	});
+}
+
+void RLPXHandshake::readAckEIP8()
+{
+	assert(m_ackCipher.size() == 210);
+	uint16_t size(m_ackCipher[0]<<8 | m_ackCipher[1]);
+	clog(NetP2PConnect) << "p2p.connect.egress receiving " << size << "bytes EIP-8 ack from " << m_socket->remoteEndpoint();
+	m_ackCipher.resize((size_t)size + 2);
+	auto rest = ba::buffer(ba::buffer(m_ackCipher) + 210);
+	auto self(shared_from_this());
+	ba::async_read(m_socket->ref(), rest, [this, self](boost::system::error_code ec, std::size_t)
+	{
+		bytesConstRef ct(&m_ackCipher);
+		if (ec)
+			transition(ec);
+		else if (decryptECIES(m_host->m_alias.secret(), ct.cropped(0, 2), ct.cropped(2), m_ack))
+		{
+			RLP rlp(m_ack, RLP::ThrowOnFail | RLP::FailIfTooSmall);
+			m_ecdheRemote = rlp[0].toHash<Public>();
+			m_remoteNonce = rlp[1].toHash<h256>();
+			m_remoteVersion = rlp[2].toInt<uint64_t>();
 			transition();
 		}
 		else
 		{
-			clog(NetP2PConnect) << "p2p.connect.egress recving ack decrypt failed for " << m_socket->remoteEndpoint();
+			clog(NetP2PConnect) << "p2p.connect.egress ack decrypt failed for " << m_socket->remoteEndpoint();
 			m_nextState = Error;
 			transition();
 		}
 	});
 }
 
+void RLPXHandshake::cancel()
+{
+	m_cancel = true;
+	m_idleTimer.cancel();
+	m_socket->close();
+	m_io.reset();
+}
+
 void RLPXHandshake::error()
 {
-	m_idleTimer.cancel();
-	
 	auto connected = m_socket->isConnected();
 	if (connected && !m_socket->remoteEndpoint().address().is_unspecified())
 		clog(NetP2PConnect) << "Disconnecting " << m_socket->remoteEndpoint() << " (Handshake Failed)";
 	else
 		clog(NetP2PConnect) << "Handshake Failed (Connection reset by peer)";
 
-	m_socket->close();
-	m_io.reset();
+	cancel();
 }
 
 void RLPXHandshake::transition(boost::system::error_code _ech)
@@ -186,6 +274,14 @@ void RLPXHandshake::transition(boost::system::error_code _ech)
 		else
 			writeAck();
 	}
+	else if (m_nextState == AckAuthEIP8)
+	{
+		m_nextState = WriteHello;
+		if (m_originated)
+			readAck();
+		else
+			writeAckEIP8();
+	}
 	else if (m_nextState == WriteHello)
 	{
 		m_nextState = ReadHello;
@@ -195,15 +291,14 @@ void RLPXHandshake::transition(boost::system::error_code _ech)
 		/// it will be passed to Host which will take ownership.
 		m_io.reset(new RLPXFrameCoder(*this));
 
-		// old packet format
-		// 5 arguments, HelloPacket
 		RLPStream s;
 		s.append((unsigned)HelloPacket).appendList(5)
-		<< dev::p2p::c_protocolVersion
-		<< m_host->m_clientVersion
-		<< m_host->caps()
-		<< m_host->listenPort()
-		<< m_host->id();
+			<< dev::p2p::c_protocolVersion
+			<< m_host->m_clientVersion
+			<< m_host->caps()
+			<< m_host->listenPort()
+			<< m_host->id();
+
 		bytes packet;
 		s.swapOut(packet);
 		m_io->writeSingleFramePacket(&packet, m_handshakeOutBuffer);
@@ -227,6 +322,14 @@ void RLPXHandshake::transition(boost::system::error_code _ech)
 				transition(ec);
 			else
 			{
+				if (!m_io)
+				{
+					clog(NetP2PWarn) << "Internal error in handshake: RLPXFrameCoder disappeared.";
+					m_nextState = Error;
+					transition();
+					return;
+
+				}
 				/// authenticate and decrypt header
 				if (!m_io->authAndDecryptHeader(bytesRef(m_handshakeInBuffer.data(), m_handshakeInBuffer.size())))
 				{
@@ -263,6 +366,14 @@ void RLPXHandshake::transition(boost::system::error_code _ech)
 						transition(ec);
 					else
 					{
+						if (!m_io)
+						{
+							clog(NetP2PWarn) << "Internal error in handshake: RLPXFrameCoder disappeared.";
+							m_nextState = Error;
+							transition();
+							return;
+
+						}
 						bytesRef frame(&m_handshakeInBuffer);
 						if (!m_io->authAndDecryptFrame(frame))
 						{

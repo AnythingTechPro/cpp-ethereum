@@ -27,7 +27,6 @@
 #ifdef __APPLE__
 #include <pthread.h>
 #endif
-#include <boost/asio/ip/tcp.hpp>
 #include "Guards.h"
 using namespace std;
 using namespace dev;
@@ -68,13 +67,14 @@ LogOverrideAux::~LogOverrideAux()
 		s_logOverride[m_ch] = (bool)m_old;
 }
 
-#ifdef _WIN32
+#if defined(_WIN32)
 const char* LogChannel::name() { return EthGray "..."; }
 const char* LeftChannel::name() { return EthNavy "<--"; }
 const char* RightChannel::name() { return EthGreen "-->"; }
 const char* WarnChannel::name() { return EthOnRed EthBlackBold "  X"; }
 const char* NoteChannel::name() { return EthBlue "  i"; }
 const char* DebugChannel::name() { return EthWhite "  D"; }
+const char* TraceChannel::name() { return EthGray "..."; }
 #else
 const char* LogChannel::name() { return EthGray "···"; }
 const char* LeftChannel::name() { return EthNavy "◀▬▬"; }
@@ -82,6 +82,7 @@ const char* RightChannel::name() { return EthGreen "▬▬▶"; }
 const char* WarnChannel::name() { return EthOnRed EthBlackBold "  ✘"; }
 const char* NoteChannel::name() { return EthBlue "  ℹ"; }
 const char* DebugChannel::name() { return EthWhite "  ◇"; }
+const char* TraceChannel::name() { return EthGray "..."; }
 #endif
 
 LogOutputStreamBase::LogOutputStreamBase(char const* _id, std::type_info const* _info, unsigned _v, bool _autospacing):
@@ -93,6 +94,7 @@ LogOutputStreamBase::LogOutputStreamBase(char const* _id, std::type_info const* 
 	if ((it != s_logOverride.end() && it->second == true) || (it == s_logOverride.end() && (int)_v <= g_logVerbosity))
 	{
 		time_t rawTime = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+		unsigned ms = chrono::duration_cast<chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() % 1000;
 		char buf[24];
 		if (strftime(buf, 24, "%X", localtime(&rawTime)) == 0)
 			buf[0] = '\0'; // empty if case strftime fails
@@ -100,13 +102,9 @@ LogOutputStreamBase::LogOutputStreamBase(char const* _id, std::type_info const* 
 		static char const* c_sep1 = EthReset EthBlack "|" EthNavy;
 		static char const* c_sep2 = EthReset EthBlack "|" EthTeal;
 		static char const* c_end = EthReset "  ";
-		m_sstr << _id << c_begin << buf << c_sep1 << getThreadName() << ThreadContext::join(c_sep2) << c_end;
+		m_sstr << _id << c_begin << buf << "." << setw(3) << setfill('0') << ms;
+		m_sstr << c_sep1 << getThreadName() << ThreadContext::join(c_sep2) << c_end;
 	}
-}
-
-void LogOutputStreamBase::append(boost::asio::ip::basic_endpoint<boost::asio::ip::tcp> const& _t)
-{
-	m_sstr << EthNavyUnder "tcp://" << _t << EthReset;
 }
 
 /// Associate a name with each thread for nice logging.
@@ -164,14 +162,9 @@ string dev::ThreadContext::join(string const& _prior)
 	return g_logThreadContext.join(_prior);
 }
 
-// foward declare without all of Windows.h
-#ifdef _WIN32
-extern "C" __declspec(dllimport) void __stdcall OutputDebugStringA(const char* lpOutputString);
-#endif
-
 string dev::getThreadName()
 {
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__GLIBC__) || defined(__APPLE__)
 	char buffer[128];
 	pthread_getname_np(pthread_self(), buffer, 127);
 	buffer[127] = 0;
@@ -183,7 +176,7 @@ string dev::getThreadName()
 
 void dev::setThreadName(string const& _n)
 {
-#if defined(__linux__)
+#if defined(__GLIBC__)
 	pthread_setname_np(pthread_self(), _n.c_str());
 #elif defined(__APPLE__)
 	pthread_setname_np(_n.c_str());
@@ -192,20 +185,7 @@ void dev::setThreadName(string const& _n)
 #endif
 }
 
-void dev::simpleDebugOut(std::string const& _s, char const*)
+void dev::debugOut(std::string const& _s)
 {
-	static SpinLock s_lock;
-	SpinGuard l(s_lock);
-
-	cerr << _s << endl << flush;
-
-	// helpful to use OutputDebugString on windows
-	#ifdef _WIN32
-	{
-		OutputDebugStringA(_s.data());
-		OutputDebugStringA("\n");
-	}
-	#endif
+	cerr << _s << '\n';
 }
-
-std::function<void(std::string const&, char const*)> dev::g_logPost = simpleDebugOut;

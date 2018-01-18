@@ -15,19 +15,13 @@
 	along with cpp-ethereum.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-// SmartVM is only available if EVM JIT is enabled
-#if ETH_EVMJIT
-
 #include "SmartVM.h"
-#include <unordered_map>
-#include <thread>
-#include <libdevcore/concurrent_queue.h>
-#include <libdevcore/Log.h>
-#include <libdevcore/SHA3.h>
-#include <libdevcore/Guards.h>
-#include <evmjit/JIT.h>
-#include <evmjit/libevmjit-cpp/Utils.h>
+#include "EVMC.h"
 #include "VMFactory.h"
+#include <libdevcore/Log.h>
+#include <libdevcore/concurrent_queue.h>
+#include <evmjit.h>
+#include <thread>
 
 namespace dev
 {
@@ -49,6 +43,8 @@ namespace
 	{
 		bytes code;
 		h256 codeHash;
+		evm_revision mode;
+		uint32_t flags;
 
 		static JitTask createStopSentinel() { return JitTask(); }
 
@@ -61,6 +57,7 @@ namespace
 
 	class JitWorker
 	{
+        EVMC& m_jit;
 		concurrent_queue<JitTask> m_queue;
 		std::thread m_worker; // Worker must be last to initialize
 
@@ -71,17 +68,16 @@ namespace
 			while (!(task = m_queue.pop()).isStopSentinel())
 			{
 				clog(JitInfo) << "Compilation... " << task.codeHash;
-				evmjit::JIT::compile(task.code.data(), task.code.size(), eth2jit(task.codeHash));
+				m_jit.compile(task.mode, task.flags, {task.code.data(), task.code.size()}, task.codeHash);
 				clog(JitInfo) << "   ...finished " << task.codeHash;
 			}
 			clog(JitInfo) << "JIT worker finished.";
 		}
 
 	public:
-		JitWorker() noexcept: m_worker([this]{ work(); })
-		{}
+        explicit JitWorker(EVMC& _jit) noexcept : m_jit(_jit), m_worker([this] { work(); }) {}
 
-		~JitWorker()
+        ~JitWorker()
 		{
 			push(JitTask::createStopSentinel());
 			m_worker.join();
@@ -91,40 +87,39 @@ namespace
 	};
 }
 
-bytesConstRef SmartVM::execImpl(u256& io_gas, ExtVMFace& _ext, OnOpFunc const& _onOp)
+owning_bytes_ref SmartVM::exec(u256& io_gas, ExtVMFace& _ext, OnOpFunc const& _onOp)
 {
-	auto codeHash = _ext.codeHash;
-	auto vmKind = VMKind::Interpreter; // default VM
+    // Keep the JIT instance.
+    static EVMC jit{evmjit_create()};
 
-	// Jitted EVM code already in memory?
-	if (evmjit::JIT::isCodeReady(eth2jit(codeHash)))
-	{
-		clog(JitInfo) << "JIT:           " << codeHash;
-		vmKind = VMKind::JIT;
-	}
-	else if (!_ext.code.empty()) // This check is needed for VM tests
-	{
-		static JitWorker s_worker;
+    auto mode = toRevision(_ext.evmSchedule());
+    uint32_t flags = _ext.staticCall ? EVM_STATIC : 0;
 
-		// Check EVM code hit count
-		static const uint64_t c_hitTreshold = 2;
-		auto& hits = getHitMap()[codeHash];
-		++hits;
-		if (hits == c_hitTreshold)
-		{
-			clog(JitInfo) << "Schedule:      " << codeHash;
-			s_worker.push({_ext.code, codeHash});
-		}
-		clog(JitInfo) << "Interpreter:   " << codeHash;
-	}
+    if (jit.isCodeReady(mode, flags, _ext.codeHash))
+    {
+        // Jitted code already in memory -- execute quicly.
+        clog(JitInfo) << "JIT:           " << _ext.codeHash;
+        return jit.exec(io_gas, _ext, _onOp);
+    }
 
-	// TODO: Selected VM must be kept only because it returns reference to its internal memory.
-	//       VM implementations should be stateless, without escaping memory reference.
-	m_selectedVM = VMFactory::create(vmKind);
-	return m_selectedVM->execImpl(io_gas, _ext, _onOp);
+    if (!_ext.code.empty())  // This check is needed for VM tests
+    {
+        static JitWorker s_worker(jit);
+
+        // Check EVM code hit count
+        static const uint64_t c_hitTreshold = 2;
+        auto& hits = getHitMap()[_ext.codeHash];
+        ++hits;
+        if (hits == c_hitTreshold)
+        {
+            clog(JitInfo) << "Schedule:      " << _ext.codeHash;
+            s_worker.push({_ext.code, _ext.codeHash, mode, flags});
+        }
+    }
+
+
+    clog(JitInfo) << "Interpreter:   " << _ext.codeHash;
+    return VMFactory::create(VMKind::Interpreter)->exec(io_gas, _ext, _onOp);
 }
-
 }
 }
-
-#endif

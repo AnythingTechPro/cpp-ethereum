@@ -22,7 +22,6 @@
 #pragma once
 
 #include <algorithm>
-#include <deque>
 
 #include <boost/integer/static_log2.hpp>
 
@@ -40,7 +39,7 @@ namespace p2p
  */
 struct NodeEntry: public Node
 {
-	NodeEntry(NodeId const& _src, Public const& _pubk, NodeIPEndpoint const& _gw);
+	NodeEntry(NodeID const& _src, Public const& _pubk, NodeIPEndpoint const& _gw);
 	unsigned const distance;	///< Node's distance (xor of _src as integer).
 	bool pending = true;		///< Node will be ignored until Pong is received
 };
@@ -54,15 +53,18 @@ enum NodeTableEventType
 class NodeTable;
 class NodeTableEventHandler
 {
-	friend class NodeTable;
 public:
-	virtual void processEvent(NodeId const& _n, NodeTableEventType const& _e) = 0;
+	friend class NodeTable;
+
+	virtual ~NodeTableEventHandler() = default;
+
+	virtual void processEvent(NodeID const& _n, NodeTableEventType const& _e) = 0;
 
 protected:
 	/// Called by NodeTable on behalf of an implementation (Host) to process new events without blocking nodetable.
 	void processEvents()
 	{
-		std::list<std::pair<NodeId, NodeTableEventType>> events;
+		std::list<std::pair<NodeID, NodeTableEventType>> events;
 		{
 			Guard l(x_events);
 			if (!m_nodeEventHandler.size())
@@ -78,11 +80,11 @@ protected:
 	}
 
 	/// Called by NodeTable to append event.
-	virtual void appendEvent(NodeId _n, NodeTableEventType _e) { Guard l(x_events); m_nodeEventHandler.push_back(_n); m_events[_n] = _e; }
+	virtual void appendEvent(NodeID _n, NodeTableEventType _e) { Guard l(x_events); m_nodeEventHandler.push_back(_n); m_events[_n] = _e; }
 
 	Mutex x_events;
-	std::list<NodeId> m_nodeEventHandler;
-	std::unordered_map<NodeId, NodeTableEventType> m_events;
+	std::list<NodeID> m_nodeEventHandler;
+	std::unordered_map<NodeID, NodeTableEventType> m_events;
 };
 
 class NodeTable;
@@ -123,9 +125,18 @@ class NodeTable: UDPSocketEvents, public std::enable_shared_from_this<NodeTable>
 	friend std::ostream& operator<<(std::ostream& _out, NodeTable const& _nodeTable);
 	using NodeSocket = UDPSocket<NodeTable, 1280>;
 	using TimePoint = std::chrono::steady_clock::time_point;	///< Steady time point.
-	using NodeIdTimePoint = std::pair<NodeId, TimePoint>;
-	using EvictionTimeout = std::pair<NodeIdTimePoint, NodeId>;	///< First NodeId (NodeIdTimePoint) may be evicted and replaced with second NodeId.
-	
+	using NodeIdTimePoint = std::pair<NodeID, TimePoint>;
+
+	/**
+	 * EvictionTimeout is used to record the timepoint of the evicted node 
+	 * and the new node ID is used to replace it.
+	 */
+	struct EvictionTimeout
+	{ 
+		NodeID newNodeID;
+		TimePoint evictedTimePoint;
+	};
+
 public:
 	enum NodeRelation { Unknown = 0, Known };
 	enum DiscoverType { Random = 0 };
@@ -135,7 +146,7 @@ public:
 	~NodeTable();
 
 	/// Returns distance based on xor metric two node ids. Used by NodeEntry and NodeTable.
-	static unsigned distance(NodeId const& _a, NodeId const& _b) { u256 d = sha3(_a) ^ sha3(_b); unsigned ret; for (ret = 0; d >>= 1; ++ret) {}; return ret; }
+	static unsigned distance(NodeID const& _a, NodeID const& _b) { u256 d = sha3(_a) ^ sha3(_b); unsigned ret; for (ret = 0; d >>= 1; ++ret) {}; return ret; }
 
 	/// Set event handler for NodeEntryAdded and NodeEntryDropped events.
 	void setEventHandler(NodeTableEventHandler* _handler) { m_nodeEventHandler.reset(_handler); }
@@ -143,11 +154,11 @@ public:
 	/// Called by implementation which provided handler to process NodeEntryAdded/NodeEntryDropped events. Events are coalesced by type whereby old events are ignored.
 	void processEvents();
 
-	/// Add node. Node will be pinged and empty shared_ptr is returned if node has never been seen or NodeId is empty.
+	/// Add node. Node will be pinged and empty shared_ptr is returned if node has never been seen or NodeID is empty.
 	std::shared_ptr<NodeEntry> addNode(Node const& _node, NodeRelation _relation = NodeRelation::Unknown);
 
 	/// Returns list of node ids active in node table.
-	std::list<NodeId> nodes() const;
+	std::list<NodeID> nodes() const;
 
 	/// Returns node count.
 	unsigned count() const { return m_nodes.size(); }
@@ -156,10 +167,10 @@ public:
 	std::list<NodeEntry> snapshot() const;
 
 	/// Returns true if node id is in node table.
-	bool haveNode(NodeId const& _id) { Guard l(x_nodes); return m_nodes.count(_id) > 0; }
+	bool haveNode(NodeID const& _id) { Guard l(x_nodes); return m_nodes.count(_id) > 0; }
 
 	/// Returns the Node to the corresponding node id or the empty Node if that id is not found.
-	Node node(NodeId const& _id);
+	Node node(NodeID const& _id);
 
 #if defined(BOOST_AUTO_TEST_SUITE) || defined(_MSC_VER) // MSVC includes access specifier in symbol name
 protected:
@@ -202,14 +213,14 @@ private:
 	NodeEntry center() const { return NodeEntry(m_node.id, m_node.publicKey(), m_node.endpoint); }
 
 	/// Used by asynchronous operations to return NodeEntry which is active and managed by node table.
-	std::shared_ptr<NodeEntry> nodeEntry(NodeId _id);
+	std::shared_ptr<NodeEntry> nodeEntry(NodeID _id);
 
 	/// Used to discovery nodes on network which are close to the given target.
 	/// Sends s_alpha concurrent requests to nodes nearest to target, for nodes nearest to target, up to s_maxSteps rounds.
-	void doDiscover(NodeId _target, unsigned _round = 0, std::shared_ptr<std::set<std::shared_ptr<NodeEntry>>> _tried = std::shared_ptr<std::set<std::shared_ptr<NodeEntry>>>());
+	void doDiscover(NodeID _target, unsigned _round = 0, std::shared_ptr<std::set<std::shared_ptr<NodeEntry>>> _tried = std::shared_ptr<std::set<std::shared_ptr<NodeEntry>>>());
 
 	/// Returns nodes from node table which are closest to target.
-	std::vector<std::shared_ptr<NodeEntry>> nearestNodeEntries(NodeId _target);
+	std::vector<std::shared_ptr<NodeEntry>> nearestNodeEntries(NodeID _target);
 
 	/// Asynchronously drops _leastSeen node if it doesn't reply and adds _new node, otherwise _new node is thrown away.
 	void evict(std::shared_ptr<NodeEntry> _leastSeen, std::shared_ptr<NodeEntry> _new);
@@ -247,19 +258,19 @@ private:
 	Secret m_secret;												///< This nodes secret key.
 
 	mutable Mutex x_nodes;											///< LOCK x_state first if both locks are required. Mutable for thread-safe copy in nodes() const.
-	std::unordered_map<NodeId, std::shared_ptr<NodeEntry>> m_nodes;	///< Known Node Endpoints
+	std::unordered_map<NodeID, std::shared_ptr<NodeEntry>> m_nodes;	///< Known Node Endpoints
 
 	mutable Mutex x_state;											///< LOCK x_state first if both x_nodes and x_state locks are required.
 	std::array<NodeBucket, s_bins> m_state;							///< State of p2p node network.
 
 	Mutex x_evictions;												///< LOCK x_evictions first if both x_nodes and x_evictions locks are required.
-	std::deque<EvictionTimeout> m_evictions;						///< Eviction timeouts.
+	std::unordered_map<NodeID, EvictionTimeout> m_evictions;		///< Eviction timeouts.
 	
 	Mutex x_pubkDiscoverPings;										///< LOCK x_nodes first if both x_nodes and x_pubkDiscoverPings locks are required.
 	std::unordered_map<bi::address, TimePoint> m_pubkDiscoverPings;	///< List of pending pings where node entry wasn't created due to unkown pubk.
 
 	Mutex x_findNodeTimeout;
-	std::list<NodeIdTimePoint> m_findNodeTimeout;					///< Timeouts for pending Ping and FindNode requests.
+	std::list<NodeIdTimePoint> m_findNodeTimeout;					///< Timeouts for FindNode requests.
 
 	std::shared_ptr<NodeSocket> m_socket;							///< Shared pointer for our UDPSocket; ASIO requires shared_ptr.
 	NodeSocket* m_socketPointer;									///< Set to m_socket.get(). Socket is created in constructor and disconnected in destructor to ensure access to pointer is safe.
@@ -276,7 +287,26 @@ inline std::ostream& operator<<(std::ostream& _out, NodeTable const& _nodeTable)
 	return _out;
 }
 
-struct InvalidRLP: public Exception {};
+struct DiscoveryDatagram: public RLPXDatagramFace
+{
+	/// Constructor used for sending.
+	DiscoveryDatagram(bi::udp::endpoint const& _to): RLPXDatagramFace(_to), ts(futureFromEpoch(std::chrono::seconds(60))) {}
+
+	/// Constructor used for parsing inbound packets.
+	DiscoveryDatagram(bi::udp::endpoint const& _from, NodeID const& _fromid, h256 const& _echo): RLPXDatagramFace(_from), sourceid(_fromid), echo(_echo) {}
+
+	// These two are set for inbound packets only.
+	NodeID sourceid; // sender public key (from signature)
+	h256 echo;       // hash of encoded packet, for reply tracking
+
+	// All discovery packets carry a timestamp, which must be greater
+	// than the current local time. This prevents replay attacks.
+	uint32_t ts = 0;
+	bool isExpired() const { return secondsSinceEpoch() > ts; }
+
+	/// Decodes UDP packets.
+	static std::unique_ptr<DiscoveryDatagram> interpretUDP(bi::udp::endpoint const& _from, bytesConstRef _packet);
+};
 
 /**
  * Ping packet: Sent to check if node is alive.
@@ -287,41 +317,64 @@ struct InvalidRLP: public Exception {};
  * If the pinged node doesn't respond, then it is removed and the new
  * node is inserted.
  */
-struct PingNode: RLPXDatagram<PingNode>
+struct PingNode: DiscoveryDatagram
 {
-	/// Constructor used for sending PingNode.
-	PingNode(NodeIPEndpoint _src, NodeIPEndpoint _dest): RLPXDatagram<PingNode>(_dest), source(_src), destination(_dest), ts(futureFromEpoch(std::chrono::seconds(60))) {}
-	
-	/// Constructor used to create empty PingNode for parsing inbound packets.
-	PingNode(bi::udp::endpoint _ep): RLPXDatagram<PingNode>(_ep), source(UnspecifiedNodeIPEndpoint), destination(UnspecifiedNodeIPEndpoint) {}
+	using DiscoveryDatagram::DiscoveryDatagram;
+	PingNode(NodeIPEndpoint const& _src, NodeIPEndpoint const& _dest): DiscoveryDatagram(_dest), source(_src), destination(_dest) {}
+	PingNode(bi::udp::endpoint const& _from, NodeID const& _fromid, h256 const& _echo): DiscoveryDatagram(_from, _fromid, _echo) {}
 
 	static const uint8_t type = 1;
+	uint8_t packetType() const { return type; }
 
 	unsigned version = 0;
 	NodeIPEndpoint source;
 	NodeIPEndpoint destination;
-	uint32_t ts = 0;
 
-	void streamRLP(RLPStream& _s) const override;
-	void interpretRLP(bytesConstRef _bytes) override;
+	void streamRLP(RLPStream& _s) const
+	{
+		_s.appendList(4);
+		_s << dev::p2p::c_protocolVersion;
+		source.streamRLP(_s);
+		destination.streamRLP(_s);
+		_s << ts;
+	}
+	void interpretRLP(bytesConstRef _bytes)
+	{
+		RLP r(_bytes, RLP::AllowNonCanon|RLP::ThrowOnFail);
+		version = r[0].toInt<unsigned>();
+		source.interpretRLP(r[1]);
+		destination.interpretRLP(r[2]);
+		ts = r[3].toInt<uint32_t>();
+	}
 };
 
 /**
  * Pong packet: Sent in response to ping
  */
-struct Pong: RLPXDatagram<Pong>
+struct Pong: DiscoveryDatagram
 {
-	Pong(bi::udp::endpoint const& _ep): RLPXDatagram<Pong>(_ep), destination(UnspecifiedNodeIPEndpoint) {}
-	Pong(NodeIPEndpoint const& _dest): RLPXDatagram<Pong>((bi::udp::endpoint)_dest), destination(_dest), ts(futureFromEpoch(std::chrono::seconds(60))) {}
+	Pong(NodeIPEndpoint const& _dest): DiscoveryDatagram((bi::udp::endpoint)_dest), destination(_dest) {}
+	Pong(bi::udp::endpoint const& _from, NodeID const& _fromid, h256 const& _echo): DiscoveryDatagram(_from, _fromid, _echo) {}
 
 	static const uint8_t type = 2;
+	uint8_t packetType() const { return type; }
 
 	NodeIPEndpoint destination;
-	h256 echo;				///< MCD of PingNode
-	uint32_t ts = 0;
 
-	void streamRLP(RLPStream& _s) const;
-	void interpretRLP(bytesConstRef _bytes);
+	void streamRLP(RLPStream& _s) const
+	{
+		_s.appendList(3);
+		destination.streamRLP(_s);
+		_s << echo;
+		_s << ts;
+	}
+	void interpretRLP(bytesConstRef _bytes)
+	{
+		RLP r(_bytes, RLP::AllowNonCanon|RLP::ThrowOnFail);
+		destination.interpretRLP(r[0]);
+		echo = (h256)r[1];
+		ts = r[2].toInt<uint32_t>();
+	}
 };
 
 /**
@@ -333,69 +386,75 @@ struct Pong: RLPXDatagram<Pong>
  * Minimum Encoded Size: 21 bytes
  * Maximum Encoded Size: 30 bytes
  *
- * target: NodeId of node. The responding node will send back nodes closest to the target.
+ * target: NodeID of node. The responding node will send back nodes closest to the target.
  *
  */
-struct FindNode: RLPXDatagram<FindNode>
+struct FindNode: DiscoveryDatagram
 {
-	FindNode(bi::udp::endpoint _ep): RLPXDatagram<FindNode>(_ep) {}
-	FindNode(bi::udp::endpoint _ep, NodeId _target): RLPXDatagram<FindNode>(_ep), target(_target), ts(futureFromEpoch(std::chrono::seconds(60))) {}
+	FindNode(bi::udp::endpoint _to, h512 _target): DiscoveryDatagram(_to), target(_target) {}
+	FindNode(bi::udp::endpoint const& _from, NodeID const& _fromid, h256 const& _echo): DiscoveryDatagram(_from, _fromid, _echo) {}
 
 	static const uint8_t type = 3;
+	uint8_t packetType() const { return type; }
 
 	h512 target;
-	uint32_t ts = 0;
 
-	void streamRLP(RLPStream& _s) const { _s.appendList(2); _s << target << ts; }
-	void interpretRLP(bytesConstRef _bytes) { RLP r(_bytes); target = r[0].toHash<h512>(); ts = r[1].toInt<uint32_t>(); }
+	void streamRLP(RLPStream& _s) const
+	{
+		_s.appendList(2); _s << target << ts;
+	}
+	void interpretRLP(bytesConstRef _bytes)
+	{
+		RLP r(_bytes, RLP::AllowNonCanon|RLP::ThrowOnFail);
+		target = r[0].toHash<h512>();
+		ts = r[1].toInt<uint32_t>();
+	}
 };
 
 /**
  * Node Packet: One or more node packets are sent in response to FindNode.
  */
-struct Neighbours: RLPXDatagram<Neighbours>
+struct Neighbours: DiscoveryDatagram
 {
-	struct Neighbour
-	{
-		Neighbour(Node const& _node): endpoint(_node.endpoint), node(_node.id) {}
-		Neighbour(RLP const& _r): endpoint(_r) { node = h512(_r[3].toBytes()); }
-		NodeIPEndpoint endpoint;
-		NodeId node;
-		void streamRLP(RLPStream& _s) const { _s.appendList(4); endpoint.streamRLP(_s, NodeIPEndpoint::StreamInline); _s << node; }
-	};
-
-	Neighbours(bi::udp::endpoint _ep): RLPXDatagram<Neighbours>(_ep), ts(secondsSinceEpoch()) {}
-	Neighbours(bi::udp::endpoint _to, std::vector<std::shared_ptr<NodeEntry>> const& _nearest, unsigned _offset = 0, unsigned _limit = 0): RLPXDatagram<Neighbours>(_to), ts(futureFromEpoch(std::chrono::seconds(60)))
+	Neighbours(bi::udp::endpoint _to, std::vector<std::shared_ptr<NodeEntry>> const& _nearest, unsigned _offset = 0, unsigned _limit = 0): DiscoveryDatagram(_to)
 	{
 		auto limit = _limit ? std::min(_nearest.size(), (size_t)(_offset + _limit)) : _nearest.size();
 		for (auto i = _offset; i < limit; i++)
 			neighbours.push_back(Neighbour(*_nearest[i]));
 	}
+	Neighbours(bi::udp::endpoint const& _to): DiscoveryDatagram(_to) {}
+	Neighbours(bi::udp::endpoint const& _from, NodeID const& _fromid, h256 const& _echo): DiscoveryDatagram(_from, _fromid, _echo) {}
+
+	struct Neighbour
+	{
+		Neighbour(Node const& _node): endpoint(_node.endpoint), node(_node.id) {}
+		Neighbour(RLP const& _r): endpoint(_r) { node = h512(_r[3].toBytes()); }
+		NodeIPEndpoint endpoint;
+		NodeID node;
+		void streamRLP(RLPStream& _s) const { _s.appendList(4); endpoint.streamRLP(_s, NodeIPEndpoint::StreamInline); _s << node; }
+	};
 
 	static const uint8_t type = 4;
-	std::vector<Neighbour> neighbours;
-	uint32_t ts = 0;
+	uint8_t packetType() const { return type; }
 
-	void streamRLP(RLPStream& _s) const { _s.appendList(2); _s.appendList(neighbours.size()); for (auto& n: neighbours) n.streamRLP(_s); _s << ts; }
-	void interpretRLP(bytesConstRef _bytes) { RLP r(_bytes); for (auto n: r[0]) neighbours.push_back(Neighbour(n)); ts = r[1].toInt<uint32_t>(); }
-};
-	
-namespace compat
-{
-	/**
-	 * Pong packet [compatability]: Sent in response to ping
-	 */
-	struct Pong: RLPXDatagram<Pong>
+	std::vector<Neighbour> neighbours;
+
+	void streamRLP(RLPStream& _s) const
 	{
-		Pong(bi::udp::endpoint const& _ep): RLPXDatagram<Pong>(_ep) {}
-		Pong(NodeIPEndpoint const& _dest): RLPXDatagram<Pong>((bi::udp::endpoint)_dest), ts(futureFromEpoch(std::chrono::seconds(60))) {}
-		static const uint8_t type = 2;
-		h256 echo;
-		uint32_t ts = 0;
-		void streamRLP(RLPStream& _s) const {	_s.appendList(2); _s << echo << ts; }
-		void interpretRLP(bytesConstRef _bytes);
-	};
-}
+		_s.appendList(2);
+		_s.appendList(neighbours.size());
+		for (auto const& n: neighbours)
+			n.streamRLP(_s);
+		_s << ts;
+	}
+	void interpretRLP(bytesConstRef _bytes)
+	{
+		RLP r(_bytes, RLP::AllowNonCanon|RLP::ThrowOnFail);
+		for (auto const& n: r[0])
+			neighbours.emplace_back(n);
+		ts = r[1].toInt<uint32_t>();
+	}
+};
 
 struct NodeTableWarn: public LogChannel { static const char* name(); static const int verbosity = 0; };
 struct NodeTableNote: public LogChannel { static const char* name(); static const int verbosity = 1; };

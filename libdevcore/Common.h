@@ -23,14 +23,18 @@
 
 #pragma once
 
-// way to many unsigned to size_t warnings in 32 bit build
+// way too many unsigned to size_t warnings in 32 bit build
 #ifdef _M_IX86
 #pragma warning(disable:4244)
 #endif
 
-#ifdef _MSC_VER
+#if _MSC_VER && _MSC_VER < 1900
 #define _ALLOW_KEYWORD_MACROS
 #define noexcept throw()
+#endif
+
+#ifdef __INTEL_COMPILER
+#pragma warning(disable:3682) //call through incomplete class
 #endif
 
 #include <map>
@@ -41,15 +45,9 @@
 #include <functional>
 #include <string>
 #include <chrono>
-#include <boost/current_function.hpp>
-#include <boost/functional/hash.hpp>
 #pragma warning(push)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-parameter"
-#include <boost/version.hpp>
-#if (BOOST_VERSION == 105800)
-	#include "boost_multiprecision_number_compare_bug_workaround.hpp"
-#endif
 #include <boost/multiprecision/cpp_int.hpp>
 #pragma warning(pop)
 #pragma GCC diagnostic pop
@@ -64,7 +62,6 @@ using byte = uint8_t;
 
 #define DEV_IGNORE_EXCEPTIONS(X) try { X; } catch (...) {}
 
-#define DEV_IF_NO_ELSE(X) if(!(X)){}else
 #define DEV_IF_THROWS(X) try{X;}catch(...)
 
 namespace dev
@@ -72,7 +69,7 @@ namespace dev
 
 extern char const* Version;
 
-static const std::string EmptyString;
+extern std::string const EmptyString;
 
 // Binary data types.
 using bytes = std::vector<byte>;
@@ -84,9 +81,9 @@ class secure_vector
 {
 public:
 	secure_vector() {}
-	secure_vector(secure_vector<T> const& _c) = default;
-	explicit secure_vector(unsigned _size): m_data(_size) {}
-	explicit secure_vector(unsigned _size, T _item): m_data(_size, _item) {}
+	secure_vector(secure_vector<T> const& /*_c*/) = default;  // See https://github.com/ethereum/libweb3core/pull/44
+	explicit secure_vector(size_t _size): m_data(_size) {}
+	explicit secure_vector(size_t _size, T _item): m_data(_size, _item) {}
 	explicit secure_vector(std::vector<T> const& _c): m_data(_c) {}
 	explicit secure_vector(vector_ref<T> _c): m_data(_c.data(), _c.data() + _c.size()) {}
 	explicit secure_vector(vector_ref<const T> _c): m_data(_c.data(), _c.data() + _c.size()) {}
@@ -129,12 +126,11 @@ using s256 =  boost::multiprecision::number<boost::multiprecision::cpp_int_backe
 using u160 =  boost::multiprecision::number<boost::multiprecision::cpp_int_backend<160, 160, boost::multiprecision::unsigned_magnitude, boost::multiprecision::unchecked, void>>;
 using s160 =  boost::multiprecision::number<boost::multiprecision::cpp_int_backend<160, 160, boost::multiprecision::signed_magnitude, boost::multiprecision::unchecked, void>>;
 using u512 =  boost::multiprecision::number<boost::multiprecision::cpp_int_backend<512, 512, boost::multiprecision::unsigned_magnitude, boost::multiprecision::unchecked, void>>;
+using s512 =  boost::multiprecision::number<boost::multiprecision::cpp_int_backend<512, 512, boost::multiprecision::signed_magnitude, boost::multiprecision::unchecked, void>>;
 using u256s = std::vector<u256>;
 using u160s = std::vector<u160>;
 using u256Set = std::set<u256>;
 using u160Set = std::set<u160>;
-
-extern const u256 UndefinedU256;
 
 // Map types.
 using StringMap = std::map<std::string, std::string>;
@@ -151,12 +147,10 @@ using strings = std::vector<std::string>;
 
 // Fixed-length string types.
 using string32 = std::array<char, 32>;
-static const string32 ZeroString32 = {{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }};
 
 // Null/Invalid values for convenience.
-static const u256 Invalid256 = ~(u256)0;
-static const bytes NullBytes;
-static const std::map<u256, u256> EmptyMapU256U256;
+extern bytes const NullBytes;
+extern u256 const Invalid256;
 
 /// Interprets @a _u as a two's complement signed number and returns the resulting s256.
 inline s256 u2s(u256 _u)
@@ -178,12 +172,25 @@ inline u256 s2u(s256 _u)
 		return u256(c_end + _u);
 }
 
+/// Converts given int to a string and appends one of a series of units according to its size.
+std::string inUnits(bigint const& _b, strings const& _units);
+
 /// @returns the smallest n >= 0 such that (1 << n) >= _x
 inline unsigned int toLog2(u256 _x)
 {
 	unsigned ret;
 	for (ret = 0; _x >>= 1; ++ret) {}
 	return ret;
+}
+
+template <size_t n> inline u256 exp10()
+{
+	return exp10<n - 1>() * u256(10);
+}
+
+template <> inline u256 exp10<0>()
+{
+	return u256(1);
 }
 
 /// @returns the absolute distance between _a and _b.
@@ -265,7 +272,7 @@ private:
 
 #define DEV_TIMED(S) for (::std::pair<::dev::TimerHelper, bool> __eth_t(S, true); __eth_t.second; __eth_t.second = false)
 #define DEV_TIMED_SCOPE(S) ::dev::TimerHelper __eth_t(S)
-#if WIN32
+#if defined(_WIN32)
 #define DEV_TIMED_FUNCTION DEV_TIMED_SCOPE(__FUNCSIG__)
 #else
 #define DEV_TIMED_FUNCTION DEV_TIMED_SCOPE(__PRETTY_FUNCTION__)
@@ -273,10 +280,17 @@ private:
 
 #define DEV_TIMED_ABOVE(S, MS) for (::std::pair<::dev::TimerHelper, bool> __eth_t(::dev::TimerHelper(S, MS), true); __eth_t.second; __eth_t.second = false)
 #define DEV_TIMED_SCOPE_ABOVE(S, MS) ::dev::TimerHelper __eth_t(S, MS)
-#if WIN32
+#if defined(_WIN32)
 #define DEV_TIMED_FUNCTION_ABOVE(MS) DEV_TIMED_SCOPE_ABOVE(__FUNCSIG__, MS)
 #else
 #define DEV_TIMED_FUNCTION_ABOVE(MS) DEV_TIMED_SCOPE_ABOVE(__PRETTY_FUNCTION__, MS)
+#endif
+
+#ifdef _MSC_VER
+// TODO.
+#define DEV_UNUSED
+#else
+#define DEV_UNUSED __attribute__((unused))
 #endif
 
 enum class WithExisting: int
@@ -287,24 +301,7 @@ enum class WithExisting: int
 	Kill
 };
 
-}
-
-namespace std
-{
-
-inline dev::WithExisting max(dev::WithExisting _a, dev::WithExisting _b)
-{
-	return static_cast<dev::WithExisting>(max(static_cast<int>(_a), static_cast<int>(_b)));
-}
-
-template <> struct hash<dev::u256>
-{
-	size_t operator()(dev::u256 const& _a) const
-	{
-		unsigned size = _a.backend().size();
-		auto limbs = _a.backend().limbs();
-		return boost::hash_range(limbs, limbs + size);
-	}
-};
+/// Get the current time in seconds since the epoch in UTC
+uint64_t utcTime();
 
 }

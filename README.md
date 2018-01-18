@@ -1,73 +1,164 @@
-## Ethereum C++ Client.
+# cpp-ethereum - Ethereum C++ client
 
-[![Join the chat at https://gitter.im/ethereum/cpp-ethereum](https://badges.gitter.im/Join%20Chat.svg)](https://gitter.im/ethereum/cpp-ethereum?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
+This repository contains [cpp-ethereum](http://cpp-ethereum.org), the [Ethereum](https://ethereum.org) C++ client.
 
-By Gav Wood et al*, 2013, 2014, 2015.
+It is the third most popular of the Ethereum clients, behind [geth](https://github.com/ethereum/go-ethereum) (the [go](https://golang.org)
+client) and [Parity](https://github.com/ethcore/parity) (the [rust](https://www.rust-lang.org/) client).  The code is exceptionally
+[portable](http://cpp-ethereum.org/portability.html) and has been used successfully on a very broad range
+of operating systems and hardware.
 
-          | Linux   | OSX | Windows
-----------|---------|-----|--------
-develop   | [![Build+Status](https://build.ethdev.com/buildstatusimage?builder=Linux%20C%2B%2B%20develop%20branch)](https://build.ethdev.com/builders/Linux%20C%2B%2B%20develop%20branch/builds/-1) | [![Build+Status](https://build.ethdev.com/buildstatusimage?builder=OSX%20C%2B%2B%20develop%20branch)](https://build.ethdev.com/builders/OSX%20C%2B%2B%20develop%20branch/builds/-1) | [![Build+Status](https://build.ethdev.com/buildstatusimage?builder=Windows%20C%2B%2B%20develop%20branch)](https://build.ethdev.com/builders/Windows%20C%2B%2B%20develop%20branch/builds/-1)
-master    | [![Build+Status](https://build.ethdev.com/buildstatusimage?builder=Linux%20C%2B%2B%20master%20branch)](https://build.ethdev.com/builders/Linux%20C%2B%2B%20master%20branch/builds/-1) | [![Build+Status](https://build.ethdev.com/buildstatusimage?builder=OSX%20C%2B%2B%20master%20branch)](https://build.ethdev.com/builders/OSX%20C%2B%2B%20master%20branch/builds/-1) | [![Build+Status](https://build.ethdev.com/buildstatusimage?builder=Windows%20C%2B%2B%20master%20branch)](https://build.ethdev.com/builders/Windows%20C%2B%2B%20master%20branch/builds/-1)
-evmjit    | [![Build+Status](https://build.ethdev.com/buildstatusimage?builder=Linux%20C%2B%2B%20develop%20evmjit)](https://build.ethdev.com/builders/Linux%20C%2B%2B%20develop%20evmjit/builds/-1) | [![Build+Status](https://build.ethdev.com/buildstatusimage?builder=OSX%20C%2B%2B%20develop%20evmjit)](https://build.ethdev.com/builders/OSX%20C%2B%2B%20develop%20evmjit/builds/-1) | N/A
 
-[![Stories in Ready](https://badge.waffle.io/ethereum/cpp-ethereum.png?label=ready&title=Ready)](http://waffle.io/ethereum/cpp-ethereum)
+## Contact
 
-Ethereum is based on a design in an original whitepaper by Vitalik Buterin. This implementation is based on the formal specification of a refinement of that idea detailed in the 'yellow paper' by Gavin Wood. Contributors, builders and testers include:
+[![Gitter](https://img.shields.io/gitter/room/nwjs/nw.js.svg)](https://gitter.im/ethereum/cpp-ethereum)
+[![GitHub Issues](https://img.shields.io/github/issues-raw/badges/shields.svg)](https://github.com/ethereum/cpp-ethereum/issues)
 
-- *arkpar* (**Arkadiy Paronyan**) Mix, PV61/BlockQueue
-- *debris* (**Marek Kotewicz**) JSONRPC, web3.js
-- *CJentzsch* (**Christoph Jentzsch**) tests, lots of tests
-- *LefterisJP* (**Lefteris Karapetsas**) Solidity, libethash
-- *chriseth* (**Christian Reitwiessner**) Solidity
-- *subtly* (**Alex Leverington**) libp2p, rlpx
-- *yann300* (**Yann Levreau**) Mix
-- *LianaHus* (**Liana Husikyan**) Solidity
-- *chfast* (**Paweł Bylica**) EVMJIT
-- *cubedro* (**Marian Oancea**) web3.js
-- *gluk256* (**Vlad Gluhovsky**) Whisper
-- *programmerTim* (**Tim Hughes**) libethash-cl
+- Chat in [cpp-ethereum channel on Gitter](https://gitter.im/ethereum/cpp-ethereum).
+- Report bugs, issues or feature requests using [GitHub issues](issues/new).
 
-And let's not forget: Caktux (neth, ongoing CI), Eric Lombrozo (original MinGW32 cross-compilation), Marko Simovic (original CI).
 
-### Building
+## Getting Started
 
-See the [Wiki](https://github.com/ethereum/cpp-ethereum/wiki) for build instructions, compatibility information and build tips. 
+The Ethereum Documentation site hosts the **[cpp-ethereum homepage](http://cpp-ethereum.org)**, which
+has a Quick Start section.
 
-### Testing
 
-To run the tests, make sure you clone the tests repository from github.com/ethereum to tests as a sibling to cpp-ethereum.
+Operating system | Status
+---------------- | ----------
+Ubuntu and macOS | [![TravisCI](https://img.shields.io/travis/ethereum/cpp-ethereum/develop.svg)](https://travis-ci.org/ethereum/cpp-ethereum)
+Windows          | [![AppVeyor](https://img.shields.io/appveyor/ci/ethereum/cpp-ethereum/develop.svg)](https://ci.appveyor.com/project/ethereum/cpp-ethereum)
 
-### Yet To Do
 
-See [TODO](https://github.com/ethereum/cpp-ethereum/wiki/TODO)
+## Building from source
 
-### License
+### Get the source code
 
-All new contributions are under the [MIT license](http://opensource.org/licenses/MIT).
-See [LICENSE](LICENSE). Some old contributions are under the [GPLv3 license](http://www.gnu.org/licenses/gpl-3.0.en.html). See [GPLV3_LICENSE](GPLV3_LICENSE).
+Git and GitHub is used to maintain the source code. Clone the repository by:
 
-### Contributing
-
-All new contributions are added under the MIT License. Please refer to the `LICENSE` file in the root directory.
-To state that you accept this fact for all of your contributions please add yourself to the list of external contributors like in the example below.
-
-#### External Contributors
-I hereby place all my contributions in this codebase under an MIT
-licence, as specified [here](http://opensource.org/licenses/MIT).
-- *Name Surname* (**email@domain**)
-
-#### Contribution guideline
-
-Please add yourself in the `@author` doxygen  section of the file your are adding/editing
-with the same wording as the one you listed yourself in the external contributors section above,
-only replacing the word **contribution** by **file**
-
-All development goes in develop branch - please don't submit pull requests to master.
-
-Please read [CodingStandards.txt](CodingStandards.txt) thoroughly before making alterations to the code base. Please do *NOT* use an editor that automatically reformats whitespace away from astylerc or the formatting guidelines as described in [CodingStandards.txt](CodingStandards.txt).
-
-libweb3jsonrpc/abstractwebthreestubserver.h is autogenerated from the jsonrpcstub executable that comes with the libjsonrpc library (json-rpc-cpp project). It shouldn't be maually altered.
-
-```bash
-jsonrpcstub spec.json --cpp-server=AbstractWebThreeStubServer
+```shell
+git clone --recursive https://github.com/ethereum/cpp-ethereum.git
+cd cpp-ethereum
 ```
+
+The `--recursive` option is important. It orders git to clone additional 
+submodules which are required to build the project.
+If you missed it you can correct your mistake with command 
+`git submodule update --init`.
+
+### Install CMake
+
+CMake is used to control the build configuration of the project. Quite recent 
+version of CMake is required 
+(at the time of writing [3.4.3 is the minimum](CMakeLists.txt#L25)).
+We recommend installing CMake by downloading and unpacking the binary 
+distribution  of the latest version available on the 
+[**CMake download page**](https://cmake.org/download/).
+
+The CMake package available in your operating system can also be installed
+and used if it meets the minimum version requirement.
+
+> **Alternative method**
+>
+> The repository contains the
+[scripts/install_cmake.sh](scripts/install_cmake.sh) script that downloads 
+> a fixed version of CMake and unpacks it to the given directory prefix. 
+> Example usage: `scripts/install_cmake.sh --prefix /usr/local`.
+
+### Install dependencies (Linux, macOS)
+
+The following *libraries* are required to be installed in the system in their
+development variant:
+
+- leveldb
+
+They usually can be installed using system-specific package manager.
+Examples for some systems:
+
+Operating system | Installation command
+---------------- | --------------------
+Debian-based     | `sudo apt-get install libleveldb-dev`
+RedHat-based     | `dnf install leveldb-devel`
+macOS            | `brew install leveldb`
+
+
+We also support a "one-button" shell script 
+[scripts/install_deps.sh](scripts/install_deps.sh)
+which attempts to aggregate dependencies installation instructions for Unix-like
+operating systems. It identifies your distro and installs the external packages.
+Supporting the script is non-trivial task so please [inform us](#contact)
+if it does not work for your use-case.
+
+### Install dependencies (Windows)
+
+We provide prebuilt dependencies required to build the project. Download them
+with the [scripts/install_deps.bat](scripts/install_deps.bat) script.
+
+```shell
+scripts/install_deps.bat
+```
+
+### Build
+
+Configure the project build with the following command. It will create the 
+`build` directory with the configuration.
+
+```shell
+mkdir build; cd build  # Create a build directory.
+cmake ..               # Configure the project.
+cmake --build .        # Build all default targets.
+```
+
+On **Windows** Visual Studio 2015 is required. You should generate Visual Studio 
+solution file (.sln) for 64-bit architecture by adding 
+`-G "Visual Studio 14 2015 Win64"` argument to the CMake configure command.
+After configuration is completed the `cpp-ethereum.sln` can be found in the
+`build` directory.
+
+```shell
+cmake .. -G "Visual Studio 14 2015 Win64"
+```
+
+## Contributing
+
+[![Contributors](https://img.shields.io/github/contributors/ethereum/cpp-ethereum.svg)](https://github.com/ethereum/cpp-ethereum/graphs/contributors)
+[![Gitter](https://img.shields.io/gitter/room/nwjs/nw.js.svg)](https://gitter.im/ethereum/cpp-ethereum)
+[![up-for-grabs](https://img.shields.io/github/issues-raw/ethereum/cpp-ethereum/up-for-grabs.svg)](https://github.com/ethereum/cpp-ethereum/labels/up-for-grabs)
+
+The current codebase is the work of many, many hands, with nearly 100
+[individual contributors](https://github.com/ethereum/cpp-ethereum/graphs/contributors) over the course of its development.
+
+Our day-to-day development chat happens on the
+[cpp-ethereum](https://gitter.im/ethereum/cpp-ethereum) Gitter channel.
+
+All contributions are welcome! We try to keep a list of tasks that are suitable
+for newcomers under the tag 
+[up-for-grabs](https://github.com/ethereum/cpp-ethereum/labels/up-for-grabs).
+If you have any questions, please just ask.
+
+Please read [CONTRIBUTING](CONTRIBUTING.md) and [CODING_STYLE](CODING_STYLE.md) 
+thoroughly before making alterations to the code base.
+
+All development goes in develop branch.
+
+
+## Mining
+
+This project is **not suitable for Ethereum mining**. The support for GPU mining 
+has been dropped some time ago including the ethminer tool. Use the ethminer tool from https://github.com/ethereum-mining/ethminer.
+
+## Testing
+
+To run the tests, make sure you clone https://github.com/ethereum/tests and point the environment variable
+`ETHEREUM_TEST_PATH` to that path.
+
+## Documentation
+
+- [Internal documentation for developers](doc/index.rst).
+- [Outdated documentation for end users](http://www.ethdocs.org/en/latest/ethereum-clients/cpp-ethereum/).
+
+
+## License
+
+[![License](https://img.shields.io/github/license/ethereum/cpp-ethereum.svg)](LICENSE)
+
+All contributions are made under the [GNU General Public License v3](https://www.gnu.org/licenses/gpl-3.0.en.html). See [LICENSE](LICENSE).

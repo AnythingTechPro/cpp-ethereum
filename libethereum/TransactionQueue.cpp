@@ -31,6 +31,8 @@ using namespace dev::eth;
 const char* TransactionQueueChannel::name() { return EthCyan "┉┅▶"; }
 const char* TransactionQueueTraceChannel::name() { return EthCyan " ┅▶"; }
 
+const size_t c_maxVerificationQueueSize = 8192;
+
 TransactionQueue::TransactionQueue(unsigned _limit, unsigned _futureLimit):
 	m_current(PriorityCompare { *this }),
 	m_limit(_limit),
@@ -46,7 +48,8 @@ TransactionQueue::TransactionQueue(unsigned _limit, unsigned _futureLimit):
 
 TransactionQueue::~TransactionQueue()
 {
-	m_aborting = true;
+	DEV_GUARDED(x_queue)
+		m_aborting = true;
 	m_queueReady.notify_all();
 	for (auto& i: m_verifiers)
 		i.join();
@@ -54,33 +57,15 @@ TransactionQueue::~TransactionQueue()
 
 ImportResult TransactionQueue::import(bytesConstRef _transactionRLP, IfDropped _ik)
 {
-	// Check if we already know this transaction.
-	h256 h = sha3(_transactionRLP);
-
-	Transaction t;
-	ImportResult ir;
+	try
 	{
-		UpgradableGuard l(m_lock);
-
-		ir = check_WITH_LOCK(h, _ik);
-		if (ir != ImportResult::Success)
-			return ir;
-
-		try
-		{
-			// Check validity of _transactionRLP as a transaction. To do this we just deserialise and attempt to determine the sender.
-			// If it doesn't work, the signature is bad.
-			// The transaction's nonce may yet be invalid (or, it could be "valid" but we may be missing a marginally older transaction).
-			t = Transaction(_transactionRLP, CheckTransaction::Everything);
-			UpgradeGuard ul(l);
-			ir = manageImport_WITH_LOCK(h, t);
-		}
-		catch (...)
-		{
-			return ImportResult::Malformed;
-		}
+		Transaction t = Transaction(_transactionRLP, CheckTransaction::Everything);
+		return import(t, _ik);
 	}
-	return ir;
+	catch (Exception const&)
+	{
+		return ImportResult::Malformed;
+	}
 }
 
 ImportResult TransactionQueue::check_WITH_LOCK(h256 const& _h, IfDropped _ik)
@@ -96,6 +81,8 @@ ImportResult TransactionQueue::check_WITH_LOCK(h256 const& _h, IfDropped _ik)
 
 ImportResult TransactionQueue::import(Transaction const& _transaction, IfDropped _ik)
 {
+	if (_transaction.hasZeroSignature())
+		return ImportResult::ZeroSignature;
 	// Check if we already know this transaction.
 	h256 h = _transaction.sha3(WithSignature);
 
@@ -115,14 +102,14 @@ ImportResult TransactionQueue::import(Transaction const& _transaction, IfDropped
 	return ret;
 }
 
-Transactions TransactionQueue::topTransactions(unsigned _limit) const
+Transactions TransactionQueue::topTransactions(unsigned _limit, h256Hash const& _avoid) const
 {
 	ReadGuard l(m_lock);
-	Transactions res;
-	unsigned n = _limit;
-	for (auto t = m_current.begin(); n != 0 && t != m_current.end(); ++t, --n)
-		res.push_back(t->transaction);
-	return res;
+	Transactions ret;
+	for (auto t = m_current.begin(); ret.size() < _limit && t != m_current.end(); ++t)
+		if (!_avoid.count(t->transaction.sha3()))
+			ret.push_back(t->transaction);
+	return ret;
 }
 
 h256Hash TransactionQueue::knownTransactions() const
@@ -353,7 +340,6 @@ void TransactionQueue::dropGood(Transaction const& _t)
 	makeCurrent_WITH_LOCK(_t);
 	if (!m_known.count(_t.sha3()))
 		return;
-	m_dropped.insert(_t.sha3());
 	remove_WITH_LOCK(_t.sha3());
 }
 
@@ -370,13 +356,23 @@ void TransactionQueue::clear()
 
 void TransactionQueue::enqueue(RLP const& _data, h512 const& _nodeId)
 {
+	bool queued = false;
 	{
 		Guard l(x_queue);
 		unsigned itemCount = _data.itemCount();
 		for (unsigned i = 0; i < itemCount; ++i)
+		{
+			if (m_unverified.size() >= c_maxVerificationQueueSize)
+			{
+				clog(TransactionQueueChannel) << "Transaction verification queue is full. Dropping" << itemCount - i << "transactions";
+				break;
+			}
 			m_unverified.emplace_back(UnverifiedTransaction(_data[i].data(), _nodeId));
+			queued = true;
+		}
 	}
-	m_queueReady.notify_all();
+	if (queued)
+		m_queueReady.notify_all();
 }
 
 void TransactionQueue::verifierBody()

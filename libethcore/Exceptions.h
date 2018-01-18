@@ -50,6 +50,8 @@ DEV_SIMPLE_EXCEPTION(BlockGasLimitReached);
 DEV_SIMPLE_EXCEPTION(FeeTooSmall);
 DEV_SIMPLE_EXCEPTION(TooMuchGasUsed);
 DEV_SIMPLE_EXCEPTION(ExtraDataTooBig);
+DEV_SIMPLE_EXCEPTION(ExtraDataIncorrect);
+DEV_SIMPLE_EXCEPTION(TransactionIsUnsigned);
 DEV_SIMPLE_EXCEPTION(InvalidSignature);
 DEV_SIMPLE_EXCEPTION(InvalidTransactionFormat);
 DEV_SIMPLE_EXCEPTION(InvalidBlockFormat);
@@ -73,11 +75,23 @@ DEV_SIMPLE_EXCEPTION(InvalidBlockNonce);
 DEV_SIMPLE_EXCEPTION(InvalidParentHash);
 DEV_SIMPLE_EXCEPTION(InvalidUncleParentHash);
 DEV_SIMPLE_EXCEPTION(InvalidNumber);
+DEV_SIMPLE_EXCEPTION(InvalidZeroSignatureTransaction);
+DEV_SIMPLE_EXCEPTION(InvalidTransactionReceiptFormat);
+DEV_SIMPLE_EXCEPTION(TransactionReceiptVersionError);
 DEV_SIMPLE_EXCEPTION(BlockNotFound);
+DEV_SIMPLE_EXCEPTION(UnknownParent);
+DEV_SIMPLE_EXCEPTION(AddressAlreadyUsed);
 
 DEV_SIMPLE_EXCEPTION(DatabaseAlreadyOpen);
 DEV_SIMPLE_EXCEPTION(DAGCreationFailure);
 DEV_SIMPLE_EXCEPTION(DAGComputeFailure);
 
+DEV_SIMPLE_EXCEPTION(UnsupportedSnapshotManifestVersion);
+DEV_SIMPLE_EXCEPTION(InvalidSnapshotManifest);
+DEV_SIMPLE_EXCEPTION(StateTrieReconstructionFailed);
+DEV_SIMPLE_EXCEPTION(InvalidStateChunkData);
+DEV_SIMPLE_EXCEPTION(InvalidBlockChunkData);
+DEV_SIMPLE_EXCEPTION(AccountAlreadyImported);
+DEV_SIMPLE_EXCEPTION(InvalidWarpStatusPacket);
 }
 }

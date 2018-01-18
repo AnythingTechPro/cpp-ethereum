@@ -1,19 +1,7 @@
-cmake_policy(SET CMP0015 NEW)
-set(CMAKE_AUTOMOC OFF)
+add_executable(ethvm main.cpp)
 
-aux_source_directory(. SRC_LIST)
+target_link_libraries(ethvm PRIVATE ethereum evm ethashseal devcore Boost::program_options)
 
-include_directories(BEFORE ..)
-include_directories(${DB_INCLUDE_DIRS})
+target_include_directories(ethvm PRIVATE ../utils)
 
-set(EXECUTABLE ethvm)
-
-add_executable(${EXECUTABLE} ${SRC_LIST})
-
-target_link_libraries(${EXECUTABLE} ethereum)
-
-if (APPLE)
-	install(TARGETS ${EXECUTABLE} DESTINATION bin)
-else()
-	eth_install_executable(${EXECUTABLE})
-endif()
+install(TARGETS ethvm DESTINATION bin OPTIONAL)

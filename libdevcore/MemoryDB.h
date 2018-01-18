@@ -22,12 +22,9 @@
 #pragma once
 
 #include <unordered_map>
-#include <libdevcore/Common.h>
-#include <libdevcore/Guards.h>
-#include <libdevcore/FixedHash.h>
-#include <libdevcore/Log.h>
-#include <libdevcore/RLP.h>
-#include "SHA3.h"
+#include "Common.h"
+#include "Log.h"
+#include "RLP.h"
 
 namespace dev
 {
@@ -48,7 +45,7 @@ public:
 
 	MemoryDB& operator=(MemoryDB const& _c);
 
-	void clear() { m_main.clear(); }	// WARNING !!!! didn't originally clear m_refCount!!!
+	void clear() { m_main.clear(); m_aux.clear(); }	// WARNING !!!! didn't originally clear m_refCount!!!
 	std::unordered_map<h256, std::string> get() const;
 
 	std::string lookup(h256 const& _h) const;

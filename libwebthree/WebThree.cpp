@@ -20,31 +20,31 @@
  */
 
 #include "WebThree.h"
-
-#include <chrono>
-#include <thread>
-
 #include <boost/filesystem.hpp>
 #include <boost/algorithm/string.hpp>
-
-#include <libdevcore/Log.h>
 #include <libethereum/Defaults.h>
 #include <libethereum/EthereumHost.h>
-#include <libwhisper/WhisperHost.h>
+#include <libethereum/ClientTest.h>
+#include <libethashseal/EthashClient.h>
 #include "BuildInfo.h"
+#include <libethashseal/Ethash.h>
 using namespace std;
 using namespace dev;
 using namespace dev::p2p;
 using namespace dev::eth;
 using namespace dev::shh;
 
+static_assert(BOOST_VERSION >= 106400, "Wrong boost headers version");
+
 WebThreeDirect::WebThreeDirect(
 	std::string const& _clientVersion,
-	std::string const& _dbPath,
+	boost::filesystem::path const& _dbPath,
+	eth::ChainParams const& _params,
 	WithExisting _we,
 	std::set<std::string> const& _interfaces,
 	NetworkPreferences const& _n,
-	bytesConstRef _network
+	bytesConstRef _network,
+	bool _testing
 ):
 	m_clientVersion(_clientVersion),
 	m_net(_clientVersion, _n, _network)
@@ -53,7 +53,15 @@ WebThreeDirect::WebThreeDirect(
 		Defaults::setDBPath(_dbPath);
 	if (_interfaces.count("eth"))
 	{
-		m_ethereum.reset(new eth::EthashClient(&m_net, shared_ptr<GasPricer>(), _dbPath, _we, 0));
+		Ethash::init();
+		NoProof::init();
+		if (_params.sealEngineName == "Ethash")
+			m_ethereum.reset(new eth::EthashClient(_params, (int)_params.networkID, &m_net, shared_ptr<GasPricer>(), _dbPath, _we));
+		else if (_params.sealEngineName == "NoProof" && _testing)
+			m_ethereum.reset(new eth::ClientTest(_params, (int)_params.networkID, &m_net, shared_ptr<GasPricer>(), _dbPath, _we));
+		else
+			m_ethereum.reset(new eth::Client(_params, (int)_params.networkID, &m_net, shared_ptr<GasPricer>(), _dbPath, _we));
+		m_ethereum->startWorking();
 		string bp = DEV_QUOTED(ETH_BUILD_PLATFORM);
 		vector<string> bps;
 		boost::split(bps, bp, boost::is_any_of("/"));
@@ -62,9 +70,6 @@ WebThreeDirect::WebThreeDirect(
 		bps.back() = bps.back().substr(0, 3);
 		m_ethereum->setExtraData(rlpList(0, string(dev::Version) + "++" + string(DEV_QUOTED(ETH_COMMIT_HASH)).substr(0, 4) + (ETH_CLEAN_REPO ? "-" : "*") + string(DEV_QUOTED(ETH_BUILD_TYPE)).substr(0, 1) + boost::join(bps, "/")));
 	}
-
-	if (_interfaces.count("shh"))
-		m_whisper = m_net.registerCapability(make_shared<WhisperHost>());
 }
 
 WebThreeDirect::~WebThreeDirect()
@@ -83,9 +88,16 @@ WebThreeDirect::~WebThreeDirect()
 	m_ethereum.reset();
 }
 
-std::string WebThreeDirect::composeClientVersion(std::string const& _client, std::string const& _clientName)
+std::string WebThreeDirect::composeClientVersion(std::string const& _client)
 {
-	return _client + "-" + "v" + dev::Version + "-" + string(DEV_QUOTED(ETH_COMMIT_HASH)).substr(0, 8) + (ETH_CLEAN_REPO ? "" : "*") + "/" + _clientName + "/" DEV_QUOTED(ETH_BUILD_TYPE) "-" DEV_QUOTED(ETH_BUILD_PLATFORM);
+	return _client + "/" + \
+		"v" + dev::Version + "/" + \
+		DEV_QUOTED(ETH_BUILD_OS) + "/" + \
+		DEV_QUOTED(ETH_BUILD_COMPILER) + "/" + \
+		DEV_QUOTED(ETH_BUILD_JIT_MODE) + "/" + \
+		DEV_QUOTED(ETH_BUILD_TYPE) + "/" + \
+		string(DEV_QUOTED(ETH_COMMIT_HASH)).substr(0, 8) + \
+		(ETH_CLEAN_REPO ? "" : "*") + "/";
 }
 
 p2p::NetworkPreferences const& WebThreeDirect::networkPreferences() const
@@ -128,14 +140,18 @@ bytes WebThreeDirect::saveNetwork()
 	return m_net.saveNetwork();
 }
 
-void WebThreeDirect::addNode(NodeId const& _node, bi::tcp::endpoint const& _host)
+void WebThreeDirect::addNode(NodeID const& _node, bi::tcp::endpoint const& _host)
 {
 	m_net.addNode(_node, NodeIPEndpoint(_host.address(), _host.port(), _host.port()));
 }
 
-void WebThreeDirect::requirePeer(NodeId const& _node, bi::tcp::endpoint const& _host)
+void WebThreeDirect::requirePeer(NodeID const& _node, bi::tcp::endpoint const& _host)
 {
 	m_net.requirePeer(_node, NodeIPEndpoint(_host.address(), _host.port(), _host.port()));
 }
 
+void WebThreeDirect::addPeer(NodeSpec const& _s, PeerType _t)
+{
+	m_net.addPeer(_s, _t);
+}
 

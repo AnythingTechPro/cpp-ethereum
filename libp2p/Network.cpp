@@ -32,7 +32,7 @@
 #include <libdevcore/Common.h>
 #include <libdevcore/Assertions.h>
 #include <libdevcore/CommonIO.h>
-#include <libethcore/Exceptions.h>
+#include <libdevcore/Exceptions.h>
 #include "Common.h"
 #include "UPnP.h"
 #include "Network.h"
@@ -41,11 +41,13 @@ using namespace std;
 using namespace dev;
 using namespace dev::p2p;
 
+static_assert(BOOST_VERSION >= 106400, "Wrong boost headers version");
+
 std::set<bi::address> Network::getInterfaceAddresses()
 {
 	std::set<bi::address> addresses;
 
-#ifdef _WIN32
+#if defined(_WIN32)
 	WSAData wsaData;
 	if (WSAStartup(MAKEWORD(1, 1), &wsaData) != 0)
 		BOOST_THROW_EXCEPTION(NoNetworking());
@@ -116,53 +118,59 @@ std::set<bi::address> Network::getInterfaceAddresses()
 
 int Network::tcp4Listen(bi::tcp::acceptor& _acceptor, NetworkPreferences const& _netPrefs)
 {
-	int retport = -1;
-	if (_netPrefs.listenIPAddress.empty())
-		for (unsigned i = 0; i < 2; ++i)
-		{
-			// try to connect w/listenPort, else attempt net-allocated port
-			bi::tcp::endpoint endpoint(bi::tcp::v4(), i ? 0 : _netPrefs.listenPort);
-			try
-			{
-				_acceptor.open(endpoint.protocol());
-				_acceptor.set_option(ba::socket_base::reuse_address(true));
-				_acceptor.bind(endpoint);
-				_acceptor.listen();
-				retport = _acceptor.local_endpoint().port();
-				break;
-			}
-			catch (...)
-			{
-				if (i)
-				{
-					// both attempts failed
-					cwarn << "Couldn't start accepting connections on host. Something very wrong with network?\n" << boost::current_exception_diagnostic_information();
-				}
-				
-				// first attempt failed
-				_acceptor.close();
-				continue;
-			}
-		}
-	else
+	// Due to the complexities of NAT and network environments (multiple NICs, tunnels, etc)
+	// and security concerns automation is the enemy of network configuration.
+	// If a preference cannot be accommodate the network must fail to start.
+	//
+	// Preferred IP: Attempt if set, else, try 0.0.0.0 (all interfaces)
+	// Preferred Port: Attempt if set, else, try c_defaultListenPort or 0 (random)
+	// TODO: throw instead of returning -1 and rename NetworkPreferences to NetworkConfig
+	
+	bi::address listenIP;
+	try
 	{
-		bi::tcp::endpoint endpoint(bi::address::from_string(_netPrefs.listenIPAddress), _netPrefs.listenPort);
+		listenIP = _netPrefs.listenIPAddress.empty() ? bi::address_v4() : bi::address::from_string(_netPrefs.listenIPAddress);
+	}
+	catch (...)
+	{
+		cwarn << "Couldn't start accepting connections on host. Failed to accept socket on " << listenIP << ":" << _netPrefs.listenPort << ".\n" << boost::current_exception_diagnostic_information();
+		return -1;
+	}
+	bool requirePort = (bool)_netPrefs.listenPort;
+
+	for (unsigned i = 0; i < 2; ++i)
+	{
+		bi::tcp::endpoint endpoint(listenIP, requirePort ? _netPrefs.listenPort : (i ? 0 : c_defaultListenPort));
 		try
 		{
+#if defined(_WIN32)
+			bool reuse = false;
+#else
+			bool reuse = true;
+#endif
 			_acceptor.open(endpoint.protocol());
-			_acceptor.set_option(ba::socket_base::reuse_address(true));
+			_acceptor.set_option(ba::socket_base::reuse_address(reuse));
 			_acceptor.bind(endpoint);
 			_acceptor.listen();
-			retport = _acceptor.local_endpoint().port();
-			assert(retport == _netPrefs.listenPort);
+			return _acceptor.local_endpoint().port();
 		}
 		catch (...)
 		{
-			clog(NetWarn) << "Couldn't start accepting connections on host. Failed to accept socket.\n" << boost::current_exception_diagnostic_information();
+			// bail if this is first attempt && port was specificed, or second attempt failed (random port)
+			if (i || requirePort)
+			{
+				// both attempts failed
+				cwarn << "Couldn't start accepting connections on host. Failed to accept socket on " << listenIP << ":" << _netPrefs.listenPort << ".\n" << boost::current_exception_diagnostic_information();
+				_acceptor.close();
+				return -1;
+			}
+			
+			_acceptor.close();
+			continue;
 		}
-		return retport;
 	}
-	return retport;
+
+	return -1;
 }
 
 bi::tcp::endpoint Network::traverseNAT(std::set<bi::address> const& _ifAddresses, unsigned short _listenPort, bi::address& o_upnpInterfaceAddr)
@@ -208,19 +216,17 @@ bi::tcp::endpoint Network::traverseNAT(std::set<bi::address> const& _ifAddresses
 bi::tcp::endpoint Network::resolveHost(string const& _addr)
 {
 	static boost::asio::io_service s_resolverIoService;
+
 	vector<string> split;
 	boost::split(split, _addr, boost::is_any_of(":"));
-	int givenPort;
+	unsigned port = dev::p2p::c_defaultIPPort;
+
 	try
 	{
-		givenPort = stoi(split.at(1));
+		if (split.size() > 1)
+			port = static_cast<unsigned>(stoi(split.at(1)));
 	}
-	catch (...)
-	{
-		clog(NetWarn) << "Error resolving host address..." << LogTag::Url << _addr << ". Could not find a port after ':'";
-		return bi::tcp::endpoint();
-	}
-	unsigned port = split.size() > 1 ? givenPort : dev::p2p::c_defaultIPPort;
+	catch(...) {}
 
 	boost::system::error_code ec;
 	bi::address address = bi::address::from_string(split[0], ec);

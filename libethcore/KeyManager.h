@@ -27,6 +27,8 @@
 #include <libdevcore/CommonData.h>
 #include <libdevcrypto/SecretStore.h>
 
+#include <boost/filesystem.hpp>
+
 namespace dev
 {
 namespace eth
@@ -72,11 +74,14 @@ enum class SemanticPassword
 class KeyManager
 {
 public:
-	KeyManager(std::string const& _keysFile = defaultPath(), std::string const& _secretsPath = SecretStore::defaultPath());
+	enum class NewKeyType { DirectICAP = 0, NoVanity, FirstTwo, FirstTwoNextTwo, FirstThree, FirstFour };
+
+	KeyManager(boost::filesystem::path const& _keysFile = defaultPath(), boost::filesystem::path const& _secretsPath = SecretStore::defaultPath());
 	~KeyManager();
 
-	void setKeysFile(std::string const& _keysFile) { m_keysFile = _keysFile; }
-	std::string const& keysFile() const { return m_keysFile; }
+	void setSecretsPath(boost::filesystem::path const& _secretsPath) { m_store.setPath(_secretsPath); }
+	void setKeysFile(boost::filesystem::path const& _keysFile) { m_keysFile = _keysFile; }
+	boost::filesystem::path const& keysFile() const { return m_keysFile; }
 
 	bool exists() const;
 	void create(std::string const& _pass);
@@ -96,6 +101,8 @@ public:
 	std::string const& accountName(Address const& _address) const;
 	/// @returns the password hint for the account for the given address;
 	std::string const& passwordHint(Address const& _address) const;
+	/// Should be called to change password
+	void changeName(Address const& _address, std::string const& _name);
 
 	/// @returns true if the given address has a key (UUID) associated with it. Equivalent to !!uuid(_a)
 	/// If the address has no key, it could be a brain wallet.
@@ -117,10 +124,10 @@ public:
 
 	/// @returns the secret key associated with an address provided the password query
 	/// function @a _pass or the zero-secret key on error.
-	Secret secret(Address const& _address, std::function<std::string()> const& _pass = DontKnowThrow) const;
+	Secret secret(Address const& _address, std::function<std::string()> const& _pass = DontKnowThrow, bool _usePasswordCache = true) const;
 	/// @returns the secret key associated with the uuid of a key provided the password query
 	/// function @a _pass or the zero-secret key on error.
-	Secret secret(h128 const& _uuid, std::function<std::string()> const& _pass = DontKnowThrow) const;
+	Secret secret(h128 const& _uuid, std::function<std::string()> const& _pass = DontKnowThrow, bool _usePasswordCache = true) const;
 
 	bool recode(Address const& _address, SemanticPassword _newPass, std::function<std::string()> const& _pass = DontKnowThrow, KDF _kdf = KDF::Scrypt);
 	bool recode(Address const& _address, std::string const& _newPass, std::string const& _hint, std::function<std::string()> const& _pass = DontKnowThrow, KDF _kdf = KDF::Scrypt);
@@ -128,7 +135,7 @@ public:
 	void kill(h128 const& _id) { kill(address(_id)); }
 	void kill(Address const& _a);
 
-	static std::string defaultPath() { return getDataDir("ethereum") + "/keys.info"; }
+	static boost::filesystem::path defaultPath() { return getDataDir("ethereum") / boost::filesystem::path("keys.info"); }
 
 	/// Extracts the secret key from the presale wallet.
 	static KeyPair presaleSecret(std::string const& _json, std::function<std::string(bool)> const& _password);
@@ -139,6 +146,8 @@ public:
 	/// @returns the HD subkey for a given key.
 	static Secret subkey(Secret const& _s, unsigned _index);
 
+	/// @returns new random keypair with given vanity
+	static  KeyPair newKeyPair(NewKeyType _type);
 private:
 	std::string getPassword(h128 const& _uuid, std::function<std::string()> const& _pass = DontKnowThrow) const;
 	std::string getPassword(h256 const& _passHash, std::function<std::string()> const& _pass = DontKnowThrow) const;
@@ -151,9 +160,9 @@ private:
 	// Only use if previously loaded ok.
 	// @returns false if wasn't previously loaded ok.
 	bool write() const { return write(m_keysFile); }
-	bool write(std::string const& _keysFile) const;
-	void write(std::string const& _pass, std::string const& _keysFile) const;	// TODO: all passwords should be a secure string.
-	void write(SecureFixedHash<16> const& _key, std::string const& _keysFile) const;
+	bool write(boost::filesystem::path const& _keysFile) const;
+	void write(std::string const& _pass, boost::filesystem::path const& _keysFile) const;	// TODO: all passwords should be a secure string.
+	void write(SecureFixedHash<16> const& _key, boost::filesystem::path const& _keysFile) const;
 
 	// Ethereum keys.
 
@@ -176,7 +185,7 @@ private:
 	// we have an upgrade strategy.
 	std::string m_defaultPasswordDeprecated;
 
-	mutable std::string m_keysFile;
+	mutable boost::filesystem::path m_keysFile;
 	mutable SecureFixedHash<16> m_keysFileKey;
 	mutable h256 m_master;
 	SecretStore m_store;

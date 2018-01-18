@@ -19,8 +19,9 @@
  * @date 2014
  */
 
-#include <libdevcore/Common.h>
 #include "MemoryDB.h"
+#include "Common.h"
+#include "CommonData.h"
 using namespace std;
 using namespace dev;
 
@@ -161,11 +162,19 @@ void MemoryDB::purge()
 #if DEV_GUARDED_DB
 	WriteGuard l(x_this);
 #endif
+	// purge m_main
 	for (auto it = m_main.begin(); it != m_main.end(); )
 		if (it->second.second)
 			++it;
 		else
 			it = m_main.erase(it);
+
+	// purge m_aux
+	for (auto it = m_aux.begin(); it != m_aux.end(); )
+		if (it->second.second)
+			++it;
+		else
+			it = m_aux.erase(it);
 }
 
 h256Hash MemoryDB::keys() const

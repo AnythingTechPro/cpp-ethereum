@@ -21,28 +21,29 @@
 
 #pragma once
 
-#include <thread>
-#include <condition_variable>
-#include <mutex>
-#include <list>
-#include <atomic>
-#include <string>
-#include <array>
-
-#include <boost/utility.hpp>
-
+#include "Block.h"
+#include "BlockChain.h"
+#include "BlockChainImporter.h"
+#include "ClientBase.h"
+#include "CommonNet.h"
+#include "StateImporter.h"
+#include "WarpHostCapability.h"
 #include <libdevcore/Common.h>
 #include <libdevcore/CommonIO.h>
 #include <libdevcore/Guards.h>
 #include <libdevcore/Worker.h>
-#include <libethcore/Params.h>
-#include <libethcore/Sealer.h>
-#include <libethcore/ABI.h>
+#include <libethcore/SealEngine.h>
 #include <libp2p/Common.h>
-#include "CanonBlockChain.h"
-#include "Block.h"
-#include "CommonNet.h"
-#include "ClientBase.h"
+#include <array>
+#include <atomic>
+#include <condition_variable>
+#include <list>
+#include <mutex>
+#include <queue>
+#include <string>
+#include <thread>
+
+#include <boost/filesystem/path.hpp>
 
 namespace dev
 {
@@ -74,17 +75,37 @@ std::ostream& operator<<(std::ostream& _out, ActivityReport const& _r);
 
 /**
  * @brief Main API hub for interfacing with Ethereum.
- * Not to be used directly - subclass.
  */
 class Client: public ClientBase, protected Worker
 {
 public:
+	Client(
+		ChainParams const& _params,
+		int _networkID,
+		p2p::Host* _host,
+		std::shared_ptr<GasPricer> _gpForAdoption,
+		boost::filesystem::path const& _dbPath = boost::filesystem::path(),
+		WithExisting _forceAction = WithExisting::Trust,
+		TransactionQueue::Limits const& _l = TransactionQueue::Limits{1024, 1024}
+	);
 	/// Destructor.
 	virtual ~Client();
+
+	/// Get information on this chain.
+	ChainParams const& chainParams() const { return bc().chainParams(); }
+
+	virtual ImportResult injectTransaction(bytes const& _rlp, IfDropped _id = IfDropped::Ignore) override { prepareForTransaction(); return m_tq.import(_rlp, _id); }
 
 	/// Resets the gas pricer to some other object.
 	void setGasPricer(std::shared_ptr<GasPricer> _gp) { m_gp = _gp; }
 	std::shared_ptr<GasPricer> gasPricer() const { return m_gp; }
+
+	/// Submits the given transaction.
+	/// @returns the new transaction's hash.
+	virtual std::pair<h256, Address> submitTransaction(TransactionSkeleton const& _t, Secret const& _secret) override;
+
+	/// Makes the given call. Nothing is recorded into the state.
+	virtual ExecutionResult call(Address const& _secret, u256 _value, Address _dest, bytes const& _data, u256 _gas, u256 _gasPrice, BlockNumber _blockNumber, FudgeFactor _ff = FudgeFactor::Strict) override;
 
 	/// Blocks until all pending transactions have been processed.
 	virtual void flushTransactions() override;
@@ -92,140 +113,117 @@ public:
 	/// Queues a block for import.
 	ImportResult queueBlock(bytes const& _block, bool _isSafe = false);
 
-	using Interface::call; // to remove warning about hiding virtual function
-	/// Makes the given call. Nothing is recorded into the state. This cheats by creating a null address and endowing it with a lot of ETH.
-	ExecutionResult call(Address _dest, bytes const& _data = bytes(), u256 _gas = 125000, u256 _value = 0, u256 _gasPrice = 1 * ether, Address const& _from = Address());
-
 	/// Get the remaining gas limit in this block.
-	virtual u256 gasLimitRemaining() const override { return m_postMine.gasLimitRemaining(); }
+	virtual u256 gasLimitRemaining() const override { return m_postSeal.gasLimitRemaining(); }
 	/// Get the gas bid price
 	virtual u256 gasBidPrice() const override { return m_gp->bid(); }
 
 	// [PRIVATE API - only relevant for base clients, not available in general]
 	/// Get the block.
-	dev::eth::Block block(h256 const& _blockHash, PopulationStatistics* o_stats = nullptr) const;
-	/// Get the state of the given block part way through execution, immediately before transaction
-	/// index @a _txi.
-	dev::eth::State state(unsigned _txi, h256 const& _block) const;
-	/// Get the state of the currently pending block part way through execution, immediately before
-	/// transaction index @a _txi.
-	dev::eth::State state(unsigned _txi) const;
+	dev::eth::Block block(h256 const& _blockHash, PopulationStatistics* o_stats) const;
 
 	/// Get the object representing the current state of Ethereum.
-	dev::eth::Block postState() const { ReadGuard l(x_postMine); return m_postMine; }
+	dev::eth::Block postState() const { ReadGuard l(x_postSeal); return m_postSeal; }
 	/// Get the object representing the current canonical blockchain.
 	BlockChain const& blockChain() const { return bc(); }
 	/// Get some information on the block queue.
 	BlockQueueStatus blockQueueStatus() const { return m_bq.status(); }
-	/// Get some information on the block queue.
-	SyncStatus syncStatus() const;
+	/// Get some information on the block syncing.
+	SyncStatus syncStatus() const override;
 	/// Get the block queue.
 	BlockQueue const& blockQueue() const { return m_bq; }
 	/// Get the block queue.
 	OverlayDB const& stateDB() const { return m_stateDB; }
-	/// Handles a request to exit the client with a specific signal
-	static void exitHandler(int signal);
+	/// Get some information on the transaction queue.
+	TransactionQueue::Status transactionQueueStatus() const { return m_tq.status(); }
+	TransactionQueue::Limits transactionQueueLimits() const { return m_tq.limits(); }
 
 	/// Freeze worker thread and sync some of the block queue.
 	std::tuple<ImportRoute, bool, unsigned> syncQueue(unsigned _max = 1);
 
-	// Mining stuff:
+	// Sealing stuff:
+	// Note: "mining"/"miner" is deprecated. Use "sealing"/"sealer".
 
-	virtual void setBeneficiary(Address _us) override { WriteGuard l(x_preMine); m_preMine.setBeneficiary(_us); }
+	virtual Address author() const override { ReadGuard l(x_preSeal); return m_preSeal.author(); }
+	virtual void setAuthor(Address const& _us) override { WriteGuard l(x_preSeal); m_preSeal.setAuthor(_us); }
 
-	/// Check block validity prior to mining.
-	bool miningParanoia() const { return m_paranoia; }
-	/// Change whether we check block validity prior to mining.
-	void setParanoia(bool _p) { m_paranoia = _p; }
-	/// Should we force mining to happen, even without transactions?
-	bool forceMining() const { return m_forceMining; }
-	/// Enable/disable forcing of mining to happen, even without transactions.
-	void setForceMining(bool _enable);
-	/// Are we allowed to GPU mine?
-	bool turboMining() const { return m_turboMining; }
-	/// Enable/disable GPU mining.
-	void setTurboMining(bool _enable = true);
-	/// Enable/disable precomputing of the DAG for next epoch
-	void setShouldPrecomputeDAG(bool _precompute);
+	/// Type of sealers available for this seal engine.
+	strings sealers() const { return sealEngine()->sealers(); }
+	/// Current sealer in use.
+	std::string sealer() const { return sealEngine()->sealer(); }
+	/// Change sealer.
+	void setSealer(std::string const& _id) { sealEngine()->setSealer(_id); if (wouldSeal()) startSealing(); }
+	/// Review option for the sealer.
+	bytes sealOption(std::string const& _name) const { return sealEngine()->option(_name); }
+	/// Set option for the sealer.
+	bool setSealOption(std::string const& _name, bytes const& _value) { auto ret = sealEngine()->setOption(_name, _value); if (wouldSeal()) startSealing(); return ret; }
 
-	/// Check to see if we should exit
-	static bool shouldExit() { return s_shouldExit; }
-	/// Check to see if we'd mine on an apparently bad chain.
-	bool mineOnBadChain() const { return m_mineOnBadChain; }
-	/// Set true if you want to mine even when the canary says you're on the wrong chain.
-	void setMineOnBadChain(bool _v) { m_mineOnBadChain = _v; }
+	/// Start sealing.
+	void startSealing() override;
+	/// Stop sealing.
+	void stopSealing() override { m_wouldSeal = false; }
+	/// Are we sealing now?
+	bool wouldSeal() const override { return m_wouldSeal; }
 
-	/// @returns true if the canary says that the chain is bad.
-	bool isChainBad() const;
-	/// @returns true if the canary says that the client should be upgraded.
-	bool isUpgradeNeeded() const;
+	/// Are we updating the chain (syncing or importing a new block)?
+	bool isSyncing() const override;
+	/// Are we syncing the chain?
+	bool isMajorSyncing() const override;
 
-	/// Start mining.
-	/// NOT thread-safe - call it & stopMining only from a single thread
-	void startMining() override;
-	/// Stop mining.
-	/// NOT thread-safe
-	void stopMining() override { m_wouldMine = false; rejigMining(); }
-	/// Are we mining now?
-	bool isMining() const override;
-	/// Are we mining now?
-	bool wouldMine() const override { return m_wouldMine; }
-	/// The hashrate...
-	u256 hashrate() const override;
-	/// Check the progress of the mining.
-	WorkingProgress miningProgress() const override;
-	/// Get and clear the mining history.
-	std::list<MineInfo> miningHistory();
+	/// Gets the network id.
+	u256 networkId() const override;
+	/// Sets the network id.
+	void setNetworkId(u256 const& _n) override;
+
+	/// Get the seal engine.
+	SealEngineFace* sealEngine() const override { return bc().sealEngine(); }
 
 	// Debug stuff:
 
 	DownloadMan const* downloadMan() const;
-	bool isSyncing() const;
-	bool isMajorSyncing() const;
-	/// Sets the network id.
-	void setNetworkId(u256 _n);
 	/// Clears pending transactions. Just for debug use.
 	void clearPending();
 	/// Kills the blockchain. Just for debug use.
 	void killChain() { reopenChain(WithExisting::Kill); }
 	/// Reloads the blockchain. Just for debug use.
-	void reopenChain(WithExisting _we = WithExisting::Trust);
+	void reopenChain(ChainParams const& _p, WithExisting _we = WithExisting::Trust);
+	void reopenChain(WithExisting _we);
 	/// Retries all blocks with unknown parents.
 	void retryUnknown() { m_bq.retryAllUnknown(); }
 	/// Get a report of activity.
 	ActivityReport activityReport() { ActivityReport ret; std::swap(m_report, ret); return ret; }
-	/// Set a JSONRPC server to which we can report bad blocks.
-	void setSentinel(std::string const& _server) { m_sentinel = _server; }
-	/// Get the JSONRPC server to which we report bad blocks.
-	std::string const& sentinel() const { return m_sentinel; }
-	/// Set the extra data that goes into mined blocks.
+	/// Set the extra data that goes into sealed blocks.
 	void setExtraData(bytes const& _extraData) { m_extraData = _extraData; }
 	/// Rewind to a prior head.
-	void rewind(unsigned _n) { bc().rewind(_n); }
+	void rewind(unsigned _n);
 	/// Rescue the chain.
 	void rescue() { bc().rescue(m_stateDB); }
-	/// Get the seal engine.
-	SealEngineFace* sealEngine() const { return m_sealEngine.get(); }
+
+	std::unique_ptr<StateImporterFace> createStateImporter() { return dev::eth::createStateImporter(m_stateDB); }
+	std::unique_ptr<BlockChainImporterFace> createBlockChainImporter() { return dev::eth::createBlockChainImporter(m_bc); }
+
+	/// Queues a function to be executed in the main thread (that owns the blockchain, etc).
+	void executeInMainThread(std::function<void()> const& _function);
+
+	virtual Block block(h256 const& _block) const override;
+	using ClientBase::block;
+
+	/// should be called after the constructor of the most derived class finishes.
+	void startWorking() { Worker::startWorking(); };
 
 protected:
-	/// New-style Constructor.
-	/// Any final derived class's constructor should make sure they call init().
-	explicit Client(std::shared_ptr<GasPricer> _gpForAdoption);
-
 	/// Perform critical setup functions.
 	/// Must be called in the constructor of the finally derived class.
-	void init(p2p::Host* _extNet, std::string const& _dbPath, WithExisting _forceAction, u256 _networkId);
+	void init(p2p::Host* _extNet, boost::filesystem::path const& _dbPath, WithExisting _forceAction, u256 _networkId);
 
 	/// InterfaceStub methods
-	virtual BlockChain& bc() override = 0;
-	virtual BlockChain const& bc() const override = 0;
+	BlockChain& bc() override { return m_bc; }
+	BlockChain const& bc() const override { return m_bc; }
 
 	/// Returns the state object for the full block (i.e. the terminal state) for index _h.
 	/// Works properly with LatestBlock and PendingBlock.
-	using ClientBase::asOf;
-	virtual Block asOf(h256 const& _block) const override;
-	virtual Block preMine() const override { ReadGuard l(x_preMine); return m_preMine; }
-	virtual Block postMine() const override { ReadGuard l(x_postMine); return m_postMine; }
+	virtual Block preSeal() const override { ReadGuard l(x_preSeal); return m_preSeal; }
+	virtual Block postSeal() const override { ReadGuard l(x_postSeal); return m_postSeal; }
 	virtual void prepareForTransaction() override;
 
 	/// Collate the changed filters for the bloom filter of the given pending transaction.
@@ -241,26 +239,27 @@ protected:
 	void noteChanged(h256Hash const& _filters);
 
 	/// Submit
-	bool submitSealed(bytes const& _s);
+	virtual bool submitSealed(bytes const& _s);
 
 protected:
 	/// Called when Worker is starting.
 	void startedWorking() override;
 
-	/// Do some work. Handles blockchain maintenance and mining.
-	void doWork() override;
+	/// Do some work. Handles blockchain maintenance and sealing.
+	void doWork(bool _doWait);
+	void doWork() override { doWork(true); }
 
 	/// Called when Worker is exiting.
 	void doneWorking() override;
 
-	/// Called when wouldMine(), turboMining(), isChainBad(), forceMining(), pendingTransactions() have changed.
-	void rejigMining();
+	/// Called when wouldSeal(), pendingTransactions() have changed.
+	void rejigSealing();
 
 	/// Called on chain changes
 	void onDeadBlocks(h256s const& _blocks, h256Hash& io_changed);
 
 	/// Called on chain changes
-	void onNewBlocks(h256s const& _blocks, h256Hash& io_changed);
+	virtual void onNewBlocks(h256s const& _blocks, h256Hash& io_changed);
 
 	/// Called after processing blocks by onChainChanged(_ir)
 	void resyncStateFromChain();
@@ -281,11 +280,11 @@ protected:
 	/// Magically called when m_tq needs syncing. Be nice and don't block.
 	void onTransactionQueueReady() { m_syncTransactionQueue = true; m_signalled.notify_all(); }
 
-	/// Magically called when m_tq needs syncing. Be nice and don't block.
+	/// Magically called when m_bq needs syncing. Be nice and don't block.
 	void onBlockQueueReady() { m_syncBlockQueue = true; m_signalled.notify_all(); }
 
-	/// Called when the post state has changed (i.e. when more transactions are in it or we're mining on a new block).
-	/// This updates m_miningInfo.
+	/// Called when the post state has changed (i.e. when more transactions are in it or we're sealing on a new block).
+	/// This updates m_sealingInfo.
 	void onPostStateChanged();
 
 	/// Does garbage collection on watches.
@@ -294,43 +293,44 @@ protected:
 	/// Ticks various system-level objects.
 	void tick();
 
-	/// @returns true only if it's worth bothering to prep the mining block.
-	bool shouldServeWork() const { return m_bq.items().first == 0 && (isMining() || remoteActive()); }
-
 	/// Called when we have attempted to import a bad block.
 	/// @warning May be called from any thread.
 	void onBadBlock(Exception& _ex) const;
 
+	/// Executes the pending functions in m_functionQueue
+	void callQueuedFunctions();
+
+	BlockChain m_bc;						///< Maintains block database and owns the seal engine.
 	BlockQueue m_bq;						///< Maintains a list of incoming blocks not yet on the blockchain (to be imported).
+	TransactionQueue m_tq;					///< Maintains a list of incoming transactions not yet in a block on the blockchain.
+
 	std::shared_ptr<GasPricer> m_gp;		///< The gas pricer.
 
 	OverlayDB m_stateDB;					///< Acts as the central point for the state database, so multiple States can share it.
-	mutable SharedMutex x_preMine;			///< Lock on m_preMine.
-	Block m_preMine;						///< The present state of the client.
-	mutable SharedMutex x_postMine;			///< Lock on m_postMine.
-	Block m_postMine;						///< The state of the client which we're mining (i.e. it'll have all the rewards added).
+	mutable SharedMutex x_preSeal;			///< Lock on m_preSeal.
+	Block m_preSeal;						///< The present state of the client.
+	mutable SharedMutex x_postSeal;			///< Lock on m_postSeal.
+	Block m_postSeal;						///< The state of the client which we're sealing (i.e. it'll have all the rewards added).
 	mutable SharedMutex x_working;			///< Lock on m_working.
-	Block m_working;						///< The state of the client which we're mining (i.e. it'll have all the rewards added), while we're actually working on it.
-	BlockInfo m_miningInfo;					///< The header we're attempting to mine on (derived from m_postMine).
+	Block m_working;						///< The state of the client which we're sealing (i.e. it'll have all the rewards added), while we're actually working on it.
+	BlockHeader m_sealingInfo;				///< The header we're attempting to seal on (derived from m_postSeal).
 	bool remoteActive() const;				///< Is there an active and valid remote worker?
 	bool m_remoteWorking = false;			///< Has the remote worker recently been reset?
 	std::atomic<bool> m_needStateReset = { false };			///< Need reset working state to premin on next sync
 	std::chrono::system_clock::time_point m_lastGetWork;	///< Is there an active and valid remote worker?
 
 	std::weak_ptr<EthereumHost> m_host;		///< Our Ethereum Host. Don't do anything if we can't lock.
+    std::weak_ptr<WarpHostCapability> m_warpHost;
 
-	std::shared_ptr<SealEngineFace> m_sealEngine;	///< Our block-sealing engine.
+    std::condition_variable m_signalled;
+	Mutex x_signalled;
 
 	Handler<> m_tqReady;
 	Handler<h256 const&> m_tqReplaced;
 	Handler<> m_bqReady;
 
-	bool m_wouldMine = false;				///< True if we /should/ be mining.
-	bool m_turboMining = false;				///< Don't squander all of our time mining actually just sleeping.
-	bool m_forceMining = false;				///< Mine even when there are no transactions pending?
-	bool m_mineOnBadChain = false;			///< Mine even when the canary says it's a bad chain.
-	bool m_paranoia = false;				///< Should we be paranoid about our state?
-	static bool s_shouldExit;				///< Exit requested?
+	bool m_wouldSeal = false;				///< True if we /should/ be sealing.
+	bool m_wouldButShouldnot = false;		///< True if the last time we called rejigSealing wouldSeal() was true but sealer's shouldSeal() was false.
 
 	mutable std::chrono::system_clock::time_point m_lastGarbageCollection;
 											///< When did we last both doing GC on the watches?
@@ -341,84 +341,13 @@ protected:
 
 	ActivityReport m_report;
 
-	std::condition_variable m_signalled;
-	Mutex x_signalled;
+	SharedMutex x_functionQueue;
+	std::queue<std::function<void()>> m_functionQueue;	///< Functions waiting to be executed in the main thread.
+
 	std::atomic<bool> m_syncTransactionQueue = {false};
 	std::atomic<bool> m_syncBlockQueue = {false};
 
-	std::string m_sentinel;
 	bytes m_extraData;
-};
-
-template <class Sealer>
-class SpecialisedClient: public Client
-{
-public:
-	explicit SpecialisedClient(
-		p2p::Host* _host,
-		std::shared_ptr<GasPricer> _gpForAdoption,
-		std::string const& _dbPath = std::string(),
-		WithExisting _forceAction = WithExisting::Trust,
-		u256 _networkId = 0
-	):
-		SpecialisedClient(_gpForAdoption, _dbPath, _forceAction)
-	{
-		init(_host, _dbPath, _forceAction, _networkId);
-	}
-
-	virtual ~SpecialisedClient() { stopWorking(); }
-
-	/// Get the object representing the current canonical blockchain.
-	CanonBlockChain<Sealer> const& blockChain() const { return m_bc; }
-
-protected:
-	explicit SpecialisedClient(
-		std::shared_ptr<GasPricer> _gpForAdoption,
-		std::string const& _dbPath = std::string(),
-		WithExisting _forceAction = WithExisting::Trust
-	):
-		Client(_gpForAdoption),
-		m_bc(_dbPath, _forceAction, [](unsigned d, unsigned t){ std::cerr << "REVISING BLOCKCHAIN: Processed " << d << " of " << t << "...\r"; })
-	{
-		m_sealEngine = std::shared_ptr<SealEngineFace>(Ethash::createSealEngine());
-		m_sealEngine->onSealGenerated([=](bytes const& header){
-			this->submitSealed(header);
-		});
-	}
-
-	virtual BlockChain& bc() override { return m_bc; }
-	virtual BlockChain const& bc() const override { return m_bc; }
-
-private:
-	CanonBlockChain<Sealer> m_bc;			///< Maintains block database.
-};
-
-class EthashClient: public SpecialisedClient<Ethash>
-{
-public:
-	/// Trivial forwarding constructor.
-	explicit EthashClient(
-		p2p::Host* _host,
-		std::shared_ptr<GasPricer> _gpForAdoption,
-		std::string const& _dbPath = std::string(),
-		WithExisting _forceAction = WithExisting::Trust,
-		u256 _networkId = 0
-	):
-		SpecialisedClient<Ethash>(_gpForAdoption, _dbPath, _forceAction)
-	{
-		init(_host, _dbPath, _forceAction, _networkId);
-	}
-
-	/// Update to the latest transactions and get hash of the current block to be mined minus the
-	/// nonce (the 'work hash') and the difficulty to be met.
-	/// @returns Tuple of hash without seal, seed hash, target boundary.
-	virtual std::tuple<h256, h256, h256> getEthashWork() override;
-
-	/** @brief Submit the proof for the proof-of-work.
-	 * @param _s A valid solution.
-	 * @return true if the solution was indeed valid and accepted.
-	 */
-	virtual bool submitEthashWork(h256 const& _mixHash, h64 const& _nonce) override;
 };
 
 }

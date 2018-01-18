@@ -1,49 +1,46 @@
-cmake_policy(SET CMP0015 NEW)
-set(CMAKE_AUTOMOC OFF)
+file(GLOB sources "*.cpp" "*.h")
 
-aux_source_directory(. SRC_LIST)
+add_library(web3jsonrpc ${sources})
 
-include_directories(BEFORE ${JSONCPP_INCLUDE_DIRS})
-include_directories(BEFORE ..)
-include_directories(${MHD_INCLUDE_DIRS})
-include_directories(${JSON_RPC_CPP_INCLUDE_DIRS})
-include_directories(${DB_INCLUDE_DIRS})
-include_directories(${Boost_INCLUDE_DIRS})
+jsonrpcstub_create(
+	web3jsonrpc eth.json
+	dev::rpc::EthFace ${CMAKE_CURRENT_SOURCE_DIR} EthFace
+	EthClient ${CMAKE_CURRENT_BINARY_DIR} EthClient
+)
 
-set(EXECUTABLE web3jsonrpc)
+jsonrpcstub_create(web3jsonrpc debug.json
+	dev::rpc::DebugFace ${CMAKE_CURRENT_SOURCE_DIR} DebugFace
+	DebugClient ${CMAKE_CURRENT_BINARY_DIR} DebugClient
+)
 
-file(GLOB HEADERS "*.h")
+jsonrpcstub_create(web3jsonrpc net.json
+	dev::rpc::NetFace ${CMAKE_CURRENT_SOURCE_DIR} NetFace
+	NetClient ${CMAKE_CURRENT_BINARY_DIR} NetClient
+)
 
-add_library(${EXECUTABLE} ${SRC_LIST} ${HEADERS})
+jsonrpcstub_create(web3jsonrpc web3.json
+	dev::rpc::Web3Face ${CMAKE_CURRENT_SOURCE_DIR} Web3Face
+	Web3Client ${CMAKE_CURRENT_BINARY_DIR} Web3Client
+)
 
-target_link_libraries(${EXECUTABLE} ${JSONCPP_LIBRARIES})
-target_link_libraries(${EXECUTABLE} ${JSON_RPC_CPP_SERVER_LIBRARIES})
-target_link_libraries(${EXECUTABLE} ${MHD_LIBRARIES})
+jsonrpcstub_create(web3jsonrpc admin_net.json
+	dev::rpc::AdminNetFace ${CMAKE_CURRENT_SOURCE_DIR} AdminNetFace
+	AdminNetClient ${CMAKE_CURRENT_BINARY_DIR} AdminNetClient
+)
 
-target_link_libraries(${EXECUTABLE} webthree)
+jsonrpcstub_create(web3jsonrpc admin_eth.json
+	dev::rpc::AdminEthFace ${CMAKE_CURRENT_SOURCE_DIR} AdminEthFace
+	AdminEthClient ${CMAKE_CURRENT_BINARY_DIR} AdminEthClient
+)
 
-if (SOLIDITY)
-	target_link_libraries(${EXECUTABLE} solidity)
-endif ()
-if (SERPENT)
-	target_link_libraries(${EXECUTABLE} serpent)
-endif ()
+jsonrpcstub_create(web3jsonrpc personal.json
+	dev::rpc::PersonalFace ${CMAKE_CURRENT_SOURCE_DIR} PersonalFace
+	PersonalClient ${CMAKE_CURRENT_BINARY_DIR} PersonalClient
+)
 
-if (ETH_JSON_RPC_STUB)
-	add_custom_target(jsonrpcstub) 
-	add_custom_command(TARGET jsonrpcstub
-		POST_BUILD
-		WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-		COMMAND ${CMAKE_COMMAND} -DETH_SPEC_PATH="${CMAKE_CURRENT_SOURCE_DIR}/spec.json" -DETH_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
-			-DETH_SERVER_DIR="${CMAKE_CURRENT_SOURCE_DIR}" -DETH_CLIENT_DIR="${CMAKE_SOURCE_DIR}/test/libweb3jsonrpc"
-			-DETH_SERVER_NAME=AbstractWebThreeStubServer -DETH_CLIENT_NAME=WebThreeStubClient
-			-DETH_JSON_RPC_STUB="${ETH_JSON_RPC_STUB}"
-			-P "${ETH_SCRIPTS_DIR}/jsonrpcstub.cmake"
-	)
-	add_dependencies(${EXECUTABLE} jsonrpcstub)
-endif ()
+jsonrpcstub_create(web3jsonrpc test.json
+	dev::rpc::TestFace ${CMAKE_CURRENT_SOURCE_DIR} TestFace
+	TestClient ${CMAKE_CURRENT_BINARY_DIR} TestClient
+)
 
-install( TARGETS ${EXECUTABLE} RUNTIME DESTINATION bin ARCHIVE DESTINATION lib LIBRARY DESTINATION lib )
-install( FILES ${HEADERS} DESTINATION include/${EXECUTABLE} )
-
-add_custom_target(aux_json SOURCES "spec.json")
+target_link_libraries(web3jsonrpc ethashseal webthree libjson-rpc-cpp::server)

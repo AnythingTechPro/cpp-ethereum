@@ -1,32 +1,37 @@
-cmake_policy(SET CMP0015 NEW)
-set(CMAKE_AUTOMOC OFF)
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DSTATICLIB")
+set(sources
+    ExtVMFace.cpp ExtVMFace.h
+    Instruction.cpp Instruction.h
+    VMFace.h
+    VMConfig.h
+    VM.cpp VM.h
+    VMCalls.cpp
+    VMOpt.cpp
+    VMSIMD.cpp
+    VMValidate.cpp
+    VMFactory.cpp VMFactory.h
+)
 
-aux_source_directory(. SRC_LIST)
-
-# we may not use it in libevm, but one of our dependecies is including boost in header file
-# and windows is failing to build without that
-include_directories(BEFORE ..)
-include_directories(${Boost_INCLUDE_DIRS})
-if (EVMJIT)
-	include_directories(../evmjit/include)
+if(EVMJIT OR HERA)
+    list(APPEND sources
+        EVMC.cpp EVMC.h
+        HeraPlusVM.cpp HeraPlusVM.h
+        SmartVM.cpp SmartVM.h
+    )
 endif()
 
-set(EXECUTABLE evm)
+add_library(evm ${sources})
 
-file(GLOB HEADERS "*.h")
+target_link_libraries(evm PUBLIC ethcore devcore PRIVATE jsoncpp_lib_static Boost::program_options)
+target_include_directories(evm PUBLIC ${CMAKE_SOURCE_DIR}/evmjit/include)
+target_include_directories(evm PUBLIC ${CMAKE_SOURCE_DIR}/hera/src)
 
-add_library(${EXECUTABLE} ${SRC_LIST} ${HEADERS})
-
-target_link_libraries(${EXECUTABLE} ethcore)
-target_link_libraries(${EXECUTABLE} devcrypto)
-target_link_libraries(${EXECUTABLE} evmcore)
-target_link_libraries(${EXECUTABLE} devcore)
-if (EVMJIT)
-	target_link_libraries(${EXECUTABLE} evmjit-cpp)
+if(EVMJIT)
+    target_link_libraries(evm PRIVATE evmjit)
+    target_compile_definitions(evm PRIVATE ETH_EVMJIT)
 endif()
 
-install( TARGETS ${EXECUTABLE} RUNTIME DESTINATION bin ARCHIVE DESTINATION lib LIBRARY DESTINATION lib )
-install( FILES ${HEADERS} DESTINATION include/${EXECUTABLE} )
-
+if(HERA)
+    target_link_libraries(evm PRIVATE hera)
+    target_compile_definitions(evm PRIVATE ETH_HERA)
+endif()

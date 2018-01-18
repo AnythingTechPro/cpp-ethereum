@@ -22,14 +22,11 @@
 
 #include "JsonHelper.h"
 
-#include <libevmcore/Instruction.h>
-#include <liblll/Compiler.h>
+#include <libethcore/SealEngine.h>
 #include <libethereum/Client.h>
 #include <libwebthree/WebThree.h>
 #include <libethcore/CommonJS.h>
-#include <libethcore/ICAP.h>
-#include <libwhisper/Message.h>
-#include <libwhisper/WhisperHost.h>
+#include <jsonrpccpp/common/exception.h>
 using namespace std;
 using namespace dev;
 using namespace eth;
@@ -45,12 +42,17 @@ Json::Value toJson(unordered_map<u256, u256> const& _storage)
 	return res;
 }
 
-Json::Value toJson(map<u256, u256> const& _storage)
+Json::Value toJson(map<h256, pair<u256, u256>> const& _storage)
 {
 	Json::Value res(Json::objectValue);
 	for (auto i: _storage)
-		res[toJS(i.first)] = toJS(i.second);
+		res[toJS(u256(i.second.first))] = toJS(i.second.second);
 	return res;
+}
+
+Json::Value toJson(Address const& _address)
+{
+	return toJS(_address);
 }
 
 // ////////////////////////////////////////////////////////////////////////////////
@@ -61,16 +63,17 @@ namespace p2p
 
 Json::Value toJson(p2p::PeerSessionInfo const& _p)
 {
+	//@todo localAddress
+	//@todo protocols
 	Json::Value ret;
 	ret["id"] = _p.id.hex();
-	ret["clientVersion"] = _p.clientVersion;
-	ret["host"] = _p.host;
-	ret["port"] = _p.port;
+	ret["name"] = _p.clientVersion;
+	ret["network"]["remoteAddress"] = _p.host + ":" + toString(_p.port);
 	ret["lastPing"] = (int)chrono::duration_cast<chrono::milliseconds>(_p.lastPing).count();
 	for (auto const& i: _p.notes)
 		ret["notes"][i.first] = i.second;
 	for (auto const& i: _p.caps)
-		ret["caps"][i.first] = (unsigned)i.second;
+		ret["caps"].append(i.first + "/" + toString((unsigned)i.second));
 	return ret;
 }
 
@@ -83,29 +86,30 @@ Json::Value toJson(p2p::PeerSessionInfo const& _p)
 namespace eth
 {
 
-Json::Value toJson(dev::eth::BlockInfo const& _bi)
+Json::Value toJson(dev::eth::BlockHeader const& _bi, SealEngineFace* _sealer)
 {
 	Json::Value res;
 	if (_bi)
 	{
-		res["hash"] = toJS(_bi.hash());
+		DEV_IGNORE_EXCEPTIONS(res["hash"] = toJS(_bi.hash()));
 		res["parentHash"] = toJS(_bi.parentHash());
 		res["sha3Uncles"] = toJS(_bi.sha3Uncles());
-		res["miner"] = toJS(_bi.beneficiary());
+		res["author"] = toJS(_bi.author());
 		res["stateRoot"] = toJS(_bi.stateRoot());
 		res["transactionsRoot"] = toJS(_bi.transactionsRoot());
-		res["difficulty"] = toJS(_bi.difficulty());
+		res["receiptsRoot"] = toJS(_bi.receiptsRoot());
 		res["number"] = toJS(_bi.number());
 		res["gasUsed"] = toJS(_bi.gasUsed());
 		res["gasLimit"] = toJS(_bi.gasLimit());
-		res["timestamp"] = toJS(_bi.timestamp());
 		res["extraData"] = toJS(_bi.extraData());
 		res["logsBloom"] = toJS(_bi.logBloom());
-		res["target"] = toJS(_bi.boundary());
+		res["timestamp"] = toJS(_bi.timestamp());
+		// TODO: remove once JSONRPC spec is updated to use "author" over "miner".
+		res["miner"] = toJS(_bi.author());
+		if (_sealer)
+			for (auto const& i: _sealer->jsInfo(_bi))
+				res[i.first] = i.second;
 
-		// TODO: move into ProofOfWork.
-//		res["nonce"] = toJS(_bi.proof.nonce);
-//		res["seedHash"] = toJS(_bi.proofCache());
 	}
 	return res;
 }
@@ -130,9 +134,9 @@ Json::Value toJson(dev::eth::Transaction const& _t, std::pair<h256, unsigned> _l
 	return res;
 }
 
-Json::Value toJson(dev::eth::BlockInfo const& _bi, BlockDetails const& _bd, UncleHashes const& _us, Transactions const& _ts)
+Json::Value toJson(dev::eth::BlockHeader const& _bi, BlockDetails const& _bd, UncleHashes const& _us, Transactions const& _ts, SealEngineFace* _face)
 {
-	Json::Value res = toJson(_bi);
+	Json::Value res = toJson(_bi, _face);
 	if (_bi)
 	{
 		res["totalDifficulty"] = toJS(_bd.totalDifficulty);
@@ -146,9 +150,9 @@ Json::Value toJson(dev::eth::BlockInfo const& _bi, BlockDetails const& _bd, Uncl
 	return res;
 }
 
-Json::Value toJson(dev::eth::BlockInfo const& _bi, BlockDetails const& _bd, UncleHashes const& _us, TransactionHashes const& _ts)
+Json::Value toJson(dev::eth::BlockHeader const& _bi, BlockDetails const& _bd, UncleHashes const& _us, TransactionHashes const& _ts, SealEngineFace* _face)
 {
-	Json::Value res = toJson(_bi);
+	Json::Value res = toJson(_bi, _face);
 	if (_bi)
 	{
 		res["totalDifficulty"] = toJS(_bd.totalDifficulty);
@@ -177,7 +181,10 @@ Json::Value toJson(dev::eth::TransactionSkeleton const& _t)
 Json::Value toJson(dev::eth::TransactionReceipt const& _t)
 {
 	Json::Value res;
-	res["stateRoot"] = toJS(_t.stateRoot());
+	if (_t.hasStatusCode())
+		res["statusCode"] = toJS(_t.statusCode());
+	else
+		res["stateRoot"] = toJS(_t.stateRoot());
 	res["gasUsed"] = toJS(_t.gasUsed());
 	res["bloom"] = toJS(_t.bloom());
 	res["log"] = dev::toJson(_t.log());
@@ -366,10 +373,10 @@ TransactionSkeleton toTransactionSkeleton(Json::Value const& _json)
 		ret.gasPrice = jsToU256(_json["gasPrice"].asString());
 
 	if (!_json["data"].empty())							// ethereum.js has preconstructed the data array
-		ret.data = jsToBytes(_json["data"].asString());
+		ret.data = jsToBytes(_json["data"].asString(), OnFailed::Throw);
 
 	if (!_json["code"].empty())
-		ret.data = jsToBytes(_json["code"].asString());
+		ret.data = jsToBytes(_json["code"].asString(), OnFailed::Throw);
 
 	if (!_json["nonce"].empty())
 		ret.nonce = jsToU256(_json["nonce"].asString());
@@ -448,84 +455,22 @@ dev::eth::LogFilter toLogFilter(Json::Value const& _json, Interface const& _clie
 }
 
 // ////////////////////////////////////////////////////////////////////////////////////
-// shh
+// rpc
 // ////////////////////////////////////////////////////////////////////////////////////
 
-namespace shh
+namespace rpc
 {
-
-Json::Value toJson(h256 const& _h, shh::Envelope const& _e, shh::Message const& _m)
+h256 h256fromHex(string const& _s)
 {
-	Json::Value res;
-	res["hash"] = toJS(_h);
-	res["expiry"] = toJS(_e.expiry());
-	res["sent"] = toJS(_e.sent());
-	res["ttl"] = toJS(_e.ttl());
-	res["workProved"] = toJS(_e.workProved());
-	res["topics"] = Json::Value(Json::arrayValue);
-	for (auto const& t: _e.topic())
-		res["topics"].append(toJS(t));
-	res["payload"] = toJS(_m.payload());
-	res["from"] = toJS(_m.from());
-	res["to"] = toJS(_m.to());
-	return res;
+	try
+	{
+		return h256(_s);
+	}
+	catch (boost::exception const&)
+	{
+		throw jsonrpc::JsonRpcException("Invalid hex-encoded string: " + _s);
+	}
 }
-
-shh::Message toMessage(Json::Value const& _json)
-{
-	shh::Message ret;
-	if (!_json["from"].empty())
-		ret.setFrom(jsToPublic(_json["from"].asString()));
-	if (!_json["to"].empty())
-		ret.setTo(jsToPublic(_json["to"].asString()));
-	if (!_json["payload"].empty())
-		ret.setPayload(jsToBytes(_json["payload"].asString()));
-	return ret;
-}
-
-shh::Envelope toSealed(Json::Value const& _json, shh::Message const& _m, Secret const& _from)
-{
-	unsigned ttl = 50;
-	unsigned workToProve = 50;
-	shh::BuildTopic bt;
-
-	if (!_json["ttl"].empty())
-		ttl = jsToInt(_json["ttl"].asString());
-
-	if (!_json["workToProve"].empty())
-		workToProve = jsToInt(_json["workToProve"].asString());
-
-	if (!_json["topics"].empty())
-		for (auto i: _json["topics"])
-		{
-			if (i.isArray())
-			{
-				for (auto j: i)
-					if (!j.isNull())
-						bt.shift(jsToBytes(j.asString()));
-			}
-			else if (!i.isNull()) // if it is anything else then string, it should and will fail
-				bt.shift(jsToBytes(i.asString()));
-		}
-
-	return _m.seal(_from, bt, ttl, workToProve);
-}
-
-pair<shh::Topics, Public> toWatch(Json::Value const& _json)
-{
-	shh::BuildTopic bt;
-	Public to;
-
-	if (!_json["to"].empty())
-		to = jsToPublic(_json["to"].asString());
-
-	if (!_json["topics"].empty())
-		for (auto i: _json["topics"])
-			bt.shift(jsToBytes(i.asString()));
-
-	return make_pair(bt, to);
-}
-
 }
 
 }

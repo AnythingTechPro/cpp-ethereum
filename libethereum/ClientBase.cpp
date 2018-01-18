@@ -22,7 +22,6 @@
 
 #include "ClientBase.h"
 #include <algorithm>
-#include <libdevcore/StructuredLogger.h>
 #include "BlockChain.h"
 #include "Executive.h"
 #include "State.h"
@@ -36,107 +35,100 @@ const char* WorkInChannel::name() { return EthOrange "⚒" EthGreen "▬▶"; }
 const char* WorkOutChannel::name() { return EthOrange "⚒" EthNavy "◀▬"; }
 const char* WorkChannel::name() { return EthOrange "⚒" EthWhite "  "; }
 
-Block ClientBase::asOf(BlockNumber _h) const
-{
-	if (_h == PendingBlock)
-		return postMine();
-	else if (_h == LatestBlock)
-		return preMine();
-	return asOf(bc().numberHash(_h));
-}
+static const int64_t c_maxGasEstimate = 50000000;
 
-pair<h256, Address> ClientBase::submitTransaction(TransactionSkeleton const& _t, Secret const& _secret)
+std::pair<u256, ExecutionResult> ClientBase::estimateGas(Address const& _from, u256 _value, Address _dest, bytes const& _data, int64_t _maxGas, u256 _gasPrice, BlockNumber _blockNumber, GasEstimationCallback const& _callback)
 {
-	prepareForTransaction();
-	
-	TransactionSkeleton ts(_t);
-	ts.from = toAddress(_secret);
-	if (_t.nonce == UndefinedU256)
-		ts.nonce = max<u256>(postMine().transactionsFrom(ts.from), m_tq.maxNonce(ts.from));
-
-	Transaction t(ts, _secret);
-	m_tq.import(t.rlp());
-	StructuredLogger::transactionReceived(t.sha3().abridged(), t.sender().abridged());
-	cnote << "New transaction " << t;
-	
-	return make_pair(t.sha3(), toAddress(ts.from, ts.nonce));
-}
-
-// TODO: remove try/catch, allow exceptions
-ExecutionResult ClientBase::call(Address const& _from, u256 _value, Address _dest, bytes const& _data, u256 _gas, u256 _gasPrice, BlockNumber _blockNumber, FudgeFactor _ff)
-{
-	ExecutionResult ret;
 	try
 	{
-		Block temp = asOf(_blockNumber);
-		u256 n = temp.transactionsFrom(_from);
-		Transaction t(_value, _gasPrice, _gas, _dest, _data, n);
-		t.forceSender(_from);
-		if (_ff == FudgeFactor::Lenient)
-			temp.mutableState().addBalance(_from, (u256)(t.gas() * t.gasPrice() + t.value()));
-		ret = temp.execute(bc().lastHashes(), t, Permanence::Reverted);
+		int64_t upperBound = _maxGas;
+		if (upperBound == Invalid256 || upperBound > c_maxGasEstimate)
+			upperBound = c_maxGasEstimate;
+		int64_t lowerBound = Transaction::baseGasRequired(!_dest, &_data, EVMSchedule());
+		Block bk = block(_blockNumber);
+		u256 gasPrice = _gasPrice == Invalid256 ? gasBidPrice() : _gasPrice;
+		ExecutionResult er;
+		ExecutionResult lastGood;
+		bool good = false;
+		while (upperBound != lowerBound)
+		{
+			int64_t mid = (lowerBound + upperBound) / 2;
+			u256 n = bk.transactionsFrom(_from);
+			Transaction t;
+			if (_dest)
+				t = Transaction(_value, gasPrice, mid, _dest, _data, n);
+			else
+				t = Transaction(_value, gasPrice, mid, _data, n);
+			t.forceSender(_from);
+			EnvInfo const env(bk.info(), bc().lastBlockHashes(), 0, mid);
+			State tempState(bk.state());
+			tempState.addBalance(_from, (u256)(t.gas() * t.gasPrice() + t.value()));
+			er = tempState.execute(env, *bc().sealEngine(), t, Permanence::Reverted).first;
+			if (er.excepted == TransactionException::OutOfGas ||
+				er.excepted == TransactionException::OutOfGasBase ||
+				er.excepted == TransactionException::OutOfGasIntrinsic ||
+				er.codeDeposit == CodeDeposit::Failed ||
+				er.excepted == TransactionException::BadJumpDestination)
+					lowerBound = lowerBound == mid ? upperBound : mid;
+			else
+			{
+				lastGood = er;
+				upperBound = upperBound == mid ? lowerBound : mid;
+				good = true;
+			}
+
+			if (_callback)
+				_callback(GasEstimationProgress { lowerBound, upperBound });
+		}
+		if (_callback)
+			_callback(GasEstimationProgress { lowerBound, upperBound });
+		return make_pair(upperBound, good ? lastGood : er);
 	}
 	catch (...)
 	{
 		// TODO: Some sort of notification of failure.
+		return make_pair(u256(), ExecutionResult());
 	}
-	return ret;
-}
-
-ExecutionResult ClientBase::create(Address const& _from, u256 _value, bytes const& _data, u256 _gas, u256 _gasPrice, BlockNumber _blockNumber, FudgeFactor _ff)
-{
-	ExecutionResult ret;
-	try
-	{
-		Block temp = asOf(_blockNumber);
-		u256 n = temp.transactionsFrom(_from);
-		//	cdebug << "Nonce at " << toAddress(_secret) << " pre:" << m_preMine.transactionsFrom(toAddress(_secret)) << " post:" << m_postMine.transactionsFrom(toAddress(_secret));
-		Transaction t(_value, _gasPrice, _gas, _data, n);
-		t.forceSender(_from);
-		if (_ff == FudgeFactor::Lenient)
-			temp.mutableState().addBalance(_from, (u256)(t.gas() * t.gasPrice() + t.value()));
-		ret = temp.execute(bc().lastHashes(), t, Permanence::Reverted);
-	}
-	catch (...)
-	{
-		// TODO: Some sort of notification of failure.
-	}
-	return ret;
 }
 
 ImportResult ClientBase::injectBlock(bytes const& _block)
 {
-	return bc().attemptImport(_block, preMine().db()).first;
+	return bc().attemptImport(_block, preSeal().db()).first;
 }
 
 u256 ClientBase::balanceAt(Address _a, BlockNumber _block) const
 {
-	return asOf(_block).balance(_a);
+	return block(_block).balance(_a);
 }
 
 u256 ClientBase::countAt(Address _a, BlockNumber _block) const
 {
-	return asOf(_block).transactionsFrom(_a);
+	return block(_block).transactionsFrom(_a);
 }
 
 u256 ClientBase::stateAt(Address _a, u256 _l, BlockNumber _block) const
 {
-	return asOf(_block).storage(_a, _l);
+	return block(_block).storage(_a, _l);
+}
+
+h256 ClientBase::stateRootAt(Address _a, BlockNumber _block) const
+{
+	return block(_block).storageRoot(_a);
 }
 
 bytes ClientBase::codeAt(Address _a, BlockNumber _block) const
 {
-	return asOf(_block).code(_a);
+	return block(_block).code(_a);
 }
 
 h256 ClientBase::codeHashAt(Address _a, BlockNumber _block) const
 {
-	return asOf(_block).codeHash(_a);
+	return block(_block).codeHash(_a);
 }
 
-unordered_map<u256, u256> ClientBase::storageAt(Address _a, BlockNumber _block) const
+map<h256, pair<u256, u256>> ClientBase::storageAt(Address _a, BlockNumber _block) const
 {
-	return asOf(_block).storage(_a);
+	return block(_block).storage(_a);
 }
 
 // TODO: remove try/catch, allow exceptions
@@ -164,7 +156,7 @@ LocalisedLogEntries ClientBase::logs(LogFilter const& _f) const
 	// Handle pending transactions differently as they're not on the block chain.
 	if (begin > bc().number())
 	{
-		Block temp = postMine();
+		Block temp = postSeal();
 		for (unsigned i = 0; i < temp.pending().size(); ++i)
 		{
 			// Might have a transaction that contains a matching log.
@@ -315,11 +307,11 @@ LocalisedLogEntries ClientBase::checkWatch(unsigned _watchId)
 	return ret;
 }
 
-BlockInfo ClientBase::blockInfo(h256 _hash) const
+BlockHeader ClientBase::blockInfo(h256 _hash) const
 {
 	if (_hash == PendingBlockHash)
-		return preMine().info();
-	return BlockInfo(bc().block(_hash));
+		return preSeal().info();
+	return BlockHeader(bc().block(_hash));
 }
 
 BlockDetails ClientBase::blockDetails(h256 _hash) const
@@ -393,14 +385,14 @@ TransactionHashes ClientBase::transactionHashes(h256 _blockHash) const
 	return bc().transactionHashes(_blockHash);
 }
 
-BlockInfo ClientBase::uncle(h256 _blockHash, unsigned _i) const
+BlockHeader ClientBase::uncle(h256 _blockHash, unsigned _i) const
 {
 	auto bl = bc().block(_blockHash);
 	RLP b(bl);
 	if (_i < b[2].itemCount())
-		return BlockInfo(b[2][_i].data(), CheckNothing, h256(), HeaderData);
+		return BlockHeader(b[2][_i].data(), HeaderData);
 	else
-		return BlockInfo();
+		return BlockHeader();
 }
 
 UncleHashes ClientBase::uncleHashes(h256 _blockHash) const
@@ -429,42 +421,42 @@ unsigned ClientBase::number() const
 
 Transactions ClientBase::pending() const
 {
-	return postMine().pending();
+	return postSeal().pending();
 }
 
 h256s ClientBase::pendingHashes() const
 {
-	return h256s() + postMine().pendingHashes();
+	return h256s() + postSeal().pendingHashes();
 }
 
-StateDiff ClientBase::diff(unsigned _txi, h256 _block) const
+BlockHeader ClientBase::pendingInfo() const
 {
-	Block b = asOf(_block);
-	return b.fromPending(_txi).diff(b.fromPending(_txi + 1), true);
+	return postSeal().info();
 }
 
-StateDiff ClientBase::diff(unsigned _txi, BlockNumber _block) const
+BlockDetails ClientBase::pendingDetails() const
 {
-	Block b = asOf(_block);
-	return b.fromPending(_txi).diff(b.fromPending(_txi + 1), true);
+	auto pm = postSeal().info();
+	auto li = Interface::blockDetails(LatestBlock);
+	return BlockDetails((unsigned)pm.number(), li.totalDifficulty + pm.difficulty(), pm.parentHash(), h256s{});
 }
 
 Addresses ClientBase::addresses(BlockNumber _block) const
 {
 	Addresses ret;
-	for (auto const& i: asOf(_block).addresses())
+	for (auto const& i: block(_block).addresses())
 		ret.push_back(i.first);
 	return ret;
 }
 
 u256 ClientBase::gasLimitRemaining() const
 {
-	return postMine().gasLimitRemaining();
+	return postSeal().gasLimitRemaining();
 }
 
-Address ClientBase::address() const
+Address ClientBase::author() const
 {
-	return preMine().beneficiary();
+	return preSeal().author();
 }
 
 h256 ClientBase::hashFromNumber(BlockNumber _number) const
@@ -521,21 +513,14 @@ bool ClientBase::isKnownTransaction(h256 const& _transactionHash) const
 
 bool ClientBase::isKnownTransaction(h256 const& _blockHash, unsigned _i) const
 {
-	return isKnown(_blockHash) && bc().transactions().size() > _i;
+	return isKnown(_blockHash) && block(_blockHash).pending().size() > _i;
 }
 
-void ClientBase::submitExternalHashrate(u256 const& _rate, h256 const& _id)
+Block ClientBase::block(BlockNumber _h) const
 {
-	m_externalRates[_id] = make_pair(_rate, chrono::steady_clock::now());
-}
-
-u256 ClientBase::externalHashrate() const
-{
-	u256 ret = 0;
-	for (auto i = m_externalRates.begin(); i != m_externalRates.end();)
-		if (chrono::steady_clock::now() - i->second.second > chrono::seconds(5))
-			i = m_externalRates.erase(i);
-		else
-			ret += i++->second.first;
-	return ret;
+	if (_h == PendingBlock)
+		return postSeal();
+	else if (_h == LatestBlock)
+		return preSeal();
+	return block(bc().numberHash(_h));
 }

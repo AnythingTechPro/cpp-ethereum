@@ -20,19 +20,88 @@
  */
 
 #include "Account.h"
-#include <liblll/Compiler.h>
-#include <test/JsonSpiritHeaders.h>
-#include <libethcore/Common.h>
+#include <libdevcore/JsonUtils.h>
+#include <libethcore/ChainOperationParams.h>
+#include <libethcore/Precompiled.h>
+
 using namespace std;
 using namespace dev;
 using namespace dev::eth;
+
+void Account::setCode(bytes&& _code)
+{
+	m_codeCache = std::move(_code);
+	m_hasNewCode = true;
+	m_codeHash = sha3(m_codeCache);
+}
+
 namespace js = json_spirit;
 
-#pragma GCC diagnostic ignored "-Wunused-variable"
+namespace
+{
 
-const h256 Account::c_contractConceptionCodeHash;
+uint64_t toUnsigned(js::mValue const& _v)
+{
+	switch (_v.type())
+	{
+	case js::int_type: return _v.get_uint64();
+	case js::str_type: return fromBigEndian<uint64_t>(fromHex(_v.get_str()));
+	default: return 0;
+	}
+}
 
-AccountMap dev::eth::jsonToAccountMap(std::string const& _json, AccountMaskMap* o_mask)
+PrecompiledContract createPrecompiledContract(js::mObject& _precompiled)
+{
+	auto n = _precompiled["name"].get_str();
+	try
+	{
+		u256 startingBlock = 0;
+		if (_precompiled.count("startingBlock"))
+			startingBlock = u256(_precompiled["startingBlock"].get_str());
+
+		if (!_precompiled.count("linear"))
+			return PrecompiledContract(PrecompiledRegistrar::pricer(n), PrecompiledRegistrar::executor(n), startingBlock);
+
+		auto l = _precompiled["linear"].get_obj();
+		unsigned base = toUnsigned(l["base"]);
+		unsigned word = toUnsigned(l["word"]);
+		return PrecompiledContract(base, word, PrecompiledRegistrar::executor(n), startingBlock);
+	}
+	catch (PricerNotFound const&)
+	{
+		cwarn << "Couldn't create a precompiled contract account. Missing a pricer called:" << n;
+		throw;
+	}
+	catch (ExecutorNotFound const&)
+	{
+		// Oh dear - missing a plugin?
+		cwarn << "Couldn't create a precompiled contract account. Missing an executor called:" << n;
+		throw;
+	}
+}
+
+}
+namespace
+{
+	string const c_wei = "wei";
+	string const c_finney = "finney";
+	string const c_balance = "balance";
+	string const c_nonce = "nonce";
+	string const c_code = "code";
+	string const c_storage = "storage";
+	string const c_shouldnotexist = "shouldnotexist";
+	string const c_precompiled = "precompiled";
+	std::set<string> const c_knownAccountFields = {
+		c_wei, c_finney, c_balance, c_nonce, c_code, c_storage, c_shouldnotexist,
+		c_code, c_precompiled
+	};
+	void validateAccountMapObj(js::mObject const& _o)
+	{
+		for (auto const& field: _o)
+			validateFieldNames(field.second.get_obj(), c_knownAccountFields);
+	}
+}
+AccountMap dev::eth::jsonToAccountMap(std::string const& _json, u256 const& _defaultNonce, AccountMaskMap* o_mask, PrecompiledContractMap* o_precompiled)
 {
 	auto u256Safe = [](std::string const& s) -> u256 {
 		bigint ret(s);
@@ -44,51 +113,65 @@ AccountMap dev::eth::jsonToAccountMap(std::string const& _json, AccountMaskMap* 
 	std::unordered_map<Address, Account> ret;
 
 	js::mValue val;
-	json_spirit::read_string(_json, val);
-
-	for (auto account: val.get_obj().count("alloc") ? val.get_obj()["alloc"].get_obj() : val.get_obj())
+	json_spirit::read_string_or_throw(_json, val);
+	js::mObject o = val.get_obj();
+	validateAccountMapObj(o);
+	for (auto const& account: o)
 	{
 		Address a(fromHex(account.first));
 		auto o = account.second.get_obj();
-		u256 balance = 0;
 
-		bool haveBalance = (o.count("wei") || o.count("finney") || o.count("balance"));
-		if (o.count("wei"))
-			balance = u256Safe(o["wei"].get_str());
-		else if (o.count("finney"))
-			balance = u256Safe(o["finney"].get_str()) * finney;
-		else if (o.count("balance"))
-			balance = u256Safe(o["balance"].get_str());
+		bool haveBalance = (o.count(c_wei) || o.count(c_finney) || o.count(c_balance));
+		bool haveNonce = o.count(c_nonce);
+		bool haveCode = o.count(c_code);
+		bool haveStorage = o.count(c_storage);
+		bool shouldNotExists = o.count(c_shouldnotexist);
 
-		bool haveCode = o.count("code");
-		if (haveCode)
+		if (haveStorage || haveCode || haveNonce || haveBalance)
 		{
-			ret[a] = Account(balance, Account::ContractConception);
-			if (o["code"].type() == json_spirit::str_type)
+			u256 balance = 0;
+			if (o.count(c_wei))
+				balance = u256Safe(o[c_wei].get_str());
+			else if (o.count(c_finney))
+				balance = u256Safe(o[c_finney].get_str()) * finney;
+			else if (o.count(c_balance))
+				balance = u256Safe(o[c_balance].get_str());
+
+			u256 nonce = haveNonce ? u256Safe(o[c_nonce].get_str()) : _defaultNonce;
+
+			if (haveCode)
 			{
-				if (o["code"].get_str().find("0x") != 0)
-					ret[a].setCode(compileLLL(o["code"].get_str(), false));
+				ret[a] = Account(nonce, balance);
+				if (o[c_code].type() == json_spirit::str_type)
+				{
+					if (o[c_code].get_str().find("0x") != 0 && !o[c_code].get_str().empty())
+						cerr << "Error importing code of account " << a << "! Code needs to be hex bytecode prefixed by \"0x\".";
+					else
+						ret[a].setCode(fromHex(o[c_code].get_str()));
+				}
 				else
-					ret[a].setCode(fromHex(o["code"].get_str().substr(2)));
+					cerr << "Error importing code of account " << a << "! Code field needs to be a string";
 			}
 			else
-				cerr << "Error importing code of account " << a << "! Code field needs to be a string";
+				ret[a] = Account(nonce, balance);
+
+			if (haveStorage)
+				for (pair<string, js::mValue> const& j: o[c_storage].get_obj())
+					ret[a].setStorage(u256(j.first), u256(j.second.get_str()));
 		}
-		else
-			ret[a] = Account(balance, Account::NormalCreation);
-
-		bool haveStorage = o.count("storage");
-		if (haveStorage)
-			for (pair<string, js::mValue> const& j: o["storage"].get_obj())
-				ret[a].setStorage(u256(j.first), u256(j.second.get_str()));
-
-		bool haveNonce = o.count("nonce");
-		if (haveNonce)
-			for (auto i = 0; i < u256Safe(o["nonce"].get_str()); ++i)
-				ret[a].incNonce();
 
 		if (o_mask)
-			(*o_mask)[a] = AccountMask(haveBalance, haveNonce, haveCode, haveStorage);
+		{
+			(*o_mask)[a] = AccountMask(haveBalance, haveNonce, haveCode, haveStorage, shouldNotExists);
+			if (!haveStorage && !haveCode && !haveNonce && !haveBalance && shouldNotExists) //defined only shouldNotExists field
+				ret[a] = Account(0, 0);
+		}
+
+		if (o_precompiled && o.count(c_precompiled))
+		{
+			js::mObject p = o[c_precompiled].get_obj();
+			o_precompiled->insert(make_pair(a, createPrecompiledContract(p)));
+		}
 	}
 
 	return ret;
