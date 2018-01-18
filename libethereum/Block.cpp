@@ -516,7 +516,7 @@ u256 Block::enact(VerifiedBlockRef const& _block, BlockChain const& _bc)
 		InvalidReceiptsStateRoot ex;
 		ex << Hash256RequirementError(m_currentBlock.receiptsRoot(), receiptsRoot);
 		ex << errinfo_receipts(receipts);
-//		ex << errinfo_vmtrace(vmTrace(_block.block, _bc, ImportRequirements::None));
+		ex << errinfo_vmtrace(vmTrace(_block.block, _bc, ImportRequirements::None));
 		BOOST_THROW_EXCEPTION(ex);
 	}
 

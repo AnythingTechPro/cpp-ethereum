@@ -22,7 +22,7 @@
 # (c) 2014-2016 cpp-ethereum contributors.
 #------------------------------------------------------------------------------
 
-cmake_minimum_required(VERSION 3.5.1)
+cmake_minimum_required(VERSION 2.8.12)
 
 if (NOT DEFINED CMAKE_TOOLCHAIN_FILE)
     # The default toolchain file configures compilers and build environment.
